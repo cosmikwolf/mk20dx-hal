@@ -1,0 +1,449 @@
+use core::marker::PhantomData;
+
+use crate::clocks::Clocks;
+use crate::gpio::{Alternate, Pin};
+use crate::pac;
+use crate::time::Hertz;
+
+// ----- Configuration -----
+
+/// UART serial port configuration.
+pub struct Config {
+    pub baudrate: Hertz,
+    pub parity: Parity,
+    pub word_length: WordLength,
+}
+
+impl Config {
+    /// Create a new configuration with the given baud rate and 8-N-1 defaults.
+    pub fn new(baudrate: Hertz) -> Self {
+        Config {
+            baudrate,
+            parity: Parity::None,
+            word_length: WordLength::Bits8,
+        }
+    }
+
+    /// Set parity mode.
+    pub fn parity(mut self, parity: Parity) -> Self {
+        self.parity = parity;
+        self
+    }
+
+    /// Set word length.
+    pub fn word_length(mut self, word_length: WordLength) -> Self {
+        self.word_length = word_length;
+        self
+    }
+}
+
+/// Parity setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Parity {
+    None,
+    Even,
+    Odd,
+}
+
+/// Word length setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WordLength {
+    Bits8,
+    Bits9,
+}
+
+// ----- Error -----
+
+/// UART communication error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Error {
+    Overrun,
+    Framing,
+    Parity,
+    Noise,
+}
+
+impl embedded_hal_nb::serial::Error for Error {
+    fn kind(&self) -> embedded_hal_nb::serial::ErrorKind {
+        match self {
+            Error::Overrun => embedded_hal_nb::serial::ErrorKind::Overrun,
+            Error::Framing => embedded_hal_nb::serial::ErrorKind::FrameFormat,
+            Error::Parity => embedded_hal_nb::serial::ErrorKind::Parity,
+            Error::Noise => embedded_hal_nb::serial::ErrorKind::Noise,
+        }
+    }
+}
+
+impl embedded_io::Error for Error {
+    fn kind(&self) -> embedded_io::ErrorKind {
+        embedded_io::ErrorKind::Other
+    }
+}
+
+// ----- Instance Abstraction -----
+
+mod sealed {
+    pub trait UartInstance {
+        fn ptr() -> *const crate::pac::uart0::RegisterBlock;
+        fn enable_clock(sim: &crate::pac::Sim);
+    }
+}
+
+/// Marker type for UART0.
+pub struct Uart0;
+/// Marker type for UART1.
+pub struct Uart1;
+/// Marker type for UART2.
+pub struct Uart2;
+
+impl sealed::UartInstance for Uart0 {
+    fn ptr() -> *const pac::uart0::RegisterBlock {
+        pac::Uart0::PTR
+    }
+    fn enable_clock(sim: &pac::Sim) {
+        sim.scgc4().modify(|_, w| w.uart0()._1());
+    }
+}
+
+impl sealed::UartInstance for Uart1 {
+    fn ptr() -> *const pac::uart0::RegisterBlock {
+        // Safety: UART1 and UART0 have identical register layouts through offset
+        // 0x16 (rcfifo). The HAL only accesses registers within this range.
+        pac::Uart1::PTR as *const pac::uart0::RegisterBlock
+    }
+    fn enable_clock(sim: &pac::Sim) {
+        sim.scgc4().modify(|_, w| w.uart1()._1());
+    }
+}
+
+impl sealed::UartInstance for Uart2 {
+    fn ptr() -> *const pac::uart0::RegisterBlock {
+        // Safety: UART2 and UART0 have identical register layouts through offset
+        // 0x16 (rcfifo). The HAL only accesses registers within this range.
+        pac::Uart2::PTR as *const pac::uart0::RegisterBlock
+    }
+    fn enable_clock(sim: &pac::Sim) {
+        sim.scgc4().modify(|_, w| w.uart2()._1());
+    }
+}
+
+fn regs<UART: sealed::UartInstance>() -> &'static pac::uart0::RegisterBlock {
+    unsafe { &*UART::ptr() }
+}
+
+// ----- Driver Types -----
+
+/// UART serial driver (combined TX + RX).
+pub struct Serial<UART> {
+    _uart: PhantomData<UART>,
+}
+
+/// UART transmit half.
+pub struct Tx<UART> {
+    _uart: PhantomData<UART>,
+}
+
+/// UART receive half.
+pub struct Rx<UART> {
+    _uart: PhantomData<UART>,
+}
+
+// ----- Baud Rate Calculation -----
+
+/// Calculate SBR and BRFA for the target baud rate.
+///
+/// `baud = module_clk / (16 * (SBR + BRFA/32))`
+fn calc_baud(module_clk: u32, baudrate: u32) -> (u16, u8) {
+    // sbr32 = module_clk * 2 / baudrate (with rounding)
+    let sbr32 = ((2 * module_clk as u64 + baudrate as u64 / 2) / baudrate as u64) as u32;
+    let sbr = (sbr32 / 32).clamp(1, 0x1FFF) as u16;
+    let brfa = (sbr32 % 32) as u8;
+    (sbr, brfa)
+}
+
+// ----- Initialization -----
+
+impl<UART: sealed::UartInstance> Serial<UART> {
+    fn init(config: Config, module_clk: u32) -> Self {
+        let uart = regs::<UART>();
+        let (sbr, brfa) = calc_baud(module_clk, config.baudrate.raw());
+
+        // Disable TX and RX during configuration
+        uart.c2().write(|w| unsafe { w.bits(0) });
+
+        // Baud rate fine adjust
+        uart.c4().write(|w| unsafe { w.brfa().bits(brfa) });
+
+        // Word length and parity
+        uart.c1().write(|w| {
+            let w = match config.word_length {
+                WordLength::Bits8 if config.parity != Parity::None => w.m()._1(),
+                WordLength::Bits8 => w.m()._0(),
+                WordLength::Bits9 => w.m()._1(),
+            };
+            match config.parity {
+                Parity::None => w.pe()._0(),
+                Parity::Even => w.pe()._1().pt()._0(),
+                Parity::Odd => w.pe()._1().pt()._1(),
+            }
+        });
+
+        // Baud rate divisor (BDL write latches the pair)
+        uart.bdh().write(|w| unsafe { w.sbr().bits((sbr >> 8) as u8) });
+        uart.bdl().write(|w| unsafe { w.sbr().bits(sbr as u8) });
+
+        // Enable FIFO (harmless on depth-1 UARTs)
+        uart.pfifo().modify(|_, w| w.txfe()._1().rxfe()._1());
+
+        // Flush FIFOs
+        uart.cfifo().write(|w| w.txflush()._1().rxflush()._1());
+
+        // TX watermark = 0, RX watermark = 1
+        uart.twfifo().write(|w| unsafe { w.bits(0) });
+        uart.rwfifo().write(|w| unsafe { w.bits(1) });
+
+        // Enable TX and RX
+        uart.c2().write(|w| w.te()._1().re()._1());
+
+        Serial { _uart: PhantomData }
+    }
+
+    /// Split into independent TX and RX halves.
+    pub fn split(self) -> (Tx<UART>, Rx<UART>) {
+        (Tx { _uart: PhantomData }, Rx { _uart: PhantomData })
+    }
+
+    /// Recombine TX and RX halves.
+    pub fn join(_tx: Tx<UART>, _rx: Rx<UART>) -> Self {
+        Serial { _uart: PhantomData }
+    }
+}
+
+// ----- Non-blocking helpers -----
+
+fn nb_read<UART: sealed::UartInstance>() -> nb::Result<u8, Error> {
+    let uart = regs::<UART>();
+    let s1 = uart.s1().read();
+
+    // Check error flags (reading S1 then D clears them)
+    if s1.or().is_1() || s1.fe().is_1() || s1.nf().is_1() || s1.pf().is_1() {
+        let _ = uart.d().read();
+        let err = if s1.or().is_1() {
+            Error::Overrun
+        } else if s1.fe().is_1() {
+            Error::Framing
+        } else if s1.nf().is_1() {
+            Error::Noise
+        } else {
+            Error::Parity
+        };
+        return Err(nb::Error::Other(err));
+    }
+
+    if s1.rdrf().is_0() {
+        return Err(nb::Error::WouldBlock);
+    }
+
+    Ok(uart.d().read().rt().bits())
+}
+
+fn nb_write<UART: sealed::UartInstance>(byte: u8) -> nb::Result<(), Error> {
+    let uart = regs::<UART>();
+    if uart.s1().read().tdre().is_0() {
+        return Err(nb::Error::WouldBlock);
+    }
+    uart.d().write(|w| unsafe { w.bits(byte) });
+    Ok(())
+}
+
+fn nb_flush<UART: sealed::UartInstance>() -> nb::Result<(), Error> {
+    let uart = regs::<UART>();
+    if uart.s1().read().tc().is_0() {
+        return Err(nb::Error::WouldBlock);
+    }
+    Ok(())
+}
+
+// ----- embedded_hal_nb::serial impls -----
+
+impl<UART: sealed::UartInstance> embedded_hal_nb::serial::ErrorType for Serial<UART> {
+    type Error = Error;
+}
+
+impl<UART: sealed::UartInstance> embedded_hal_nb::serial::Read<u8> for Serial<UART> {
+    fn read(&mut self) -> nb::Result<u8, Self::Error> {
+        nb_read::<UART>()
+    }
+}
+
+impl<UART: sealed::UartInstance> embedded_hal_nb::serial::Write<u8> for Serial<UART> {
+    fn write(&mut self, byte: u8) -> nb::Result<(), Self::Error> {
+        nb_write::<UART>(byte)
+    }
+    fn flush(&mut self) -> nb::Result<(), Self::Error> {
+        nb_flush::<UART>()
+    }
+}
+
+impl<UART: sealed::UartInstance> embedded_hal_nb::serial::ErrorType for Tx<UART> {
+    type Error = Error;
+}
+
+impl<UART: sealed::UartInstance> embedded_hal_nb::serial::Write<u8> for Tx<UART> {
+    fn write(&mut self, byte: u8) -> nb::Result<(), Self::Error> {
+        nb_write::<UART>(byte)
+    }
+    fn flush(&mut self) -> nb::Result<(), Self::Error> {
+        nb_flush::<UART>()
+    }
+}
+
+impl<UART: sealed::UartInstance> embedded_hal_nb::serial::ErrorType for Rx<UART> {
+    type Error = Error;
+}
+
+impl<UART: sealed::UartInstance> embedded_hal_nb::serial::Read<u8> for Rx<UART> {
+    fn read(&mut self) -> nb::Result<u8, Self::Error> {
+        nb_read::<UART>()
+    }
+}
+
+// ----- embedded_io impls -----
+
+impl<UART: sealed::UartInstance> embedded_io::ErrorType for Serial<UART> {
+    type Error = Error;
+}
+
+impl<UART: sealed::UartInstance> embedded_io::Read for Serial<UART> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        buf[0] = nb::block!(nb_read::<UART>())?;
+        let mut count = 1;
+        while count < buf.len() {
+            match nb_read::<UART>() {
+                Ok(byte) => {
+                    buf[count] = byte;
+                    count += 1;
+                }
+                Err(nb::Error::WouldBlock) => break,
+                Err(nb::Error::Other(e)) => return Err(e),
+            }
+        }
+        Ok(count)
+    }
+}
+
+impl<UART: sealed::UartInstance> embedded_io::Write for Serial<UART> {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        nb::block!(nb_write::<UART>(buf[0]))?;
+        let mut count = 1;
+        while count < buf.len() {
+            match nb_write::<UART>(buf[count]) {
+                Ok(()) => count += 1,
+                Err(nb::Error::WouldBlock) => break,
+                Err(nb::Error::Other(e)) => return Err(e),
+            }
+        }
+        Ok(count)
+    }
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        nb::block!(nb_flush::<UART>())?;
+        Ok(())
+    }
+}
+
+impl<UART: sealed::UartInstance> embedded_io::ErrorType for Tx<UART> {
+    type Error = Error;
+}
+
+impl<UART: sealed::UartInstance> embedded_io::Write for Tx<UART> {
+    fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        nb::block!(nb_write::<UART>(buf[0]))?;
+        let mut count = 1;
+        while count < buf.len() {
+            match nb_write::<UART>(buf[count]) {
+                Ok(()) => count += 1,
+                Err(nb::Error::WouldBlock) => break,
+                Err(nb::Error::Other(e)) => return Err(e),
+            }
+        }
+        Ok(count)
+    }
+    fn flush(&mut self) -> Result<(), Self::Error> {
+        nb::block!(nb_flush::<UART>())?;
+        Ok(())
+    }
+}
+
+impl<UART: sealed::UartInstance> embedded_io::ErrorType for Rx<UART> {
+    type Error = Error;
+}
+
+impl<UART: sealed::UartInstance> embedded_io::Read for Rx<UART> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        buf[0] = nb::block!(nb_read::<UART>())?;
+        let mut count = 1;
+        while count < buf.len() {
+            match nb_read::<UART>() {
+                Ok(byte) => {
+                    buf[count] = byte;
+                    count += 1;
+                }
+                Err(nb::Error::WouldBlock) => break,
+                Err(nb::Error::Other(e)) => return Err(e),
+            }
+        }
+        Ok(count)
+    }
+}
+
+// ----- Extension Trait -----
+
+/// Extension trait for creating UART serial ports from PAC peripherals.
+pub trait UartExt: Sized {
+    type Instance: sealed::UartInstance;
+
+    fn serial<const TP: char, const TN: u8, const RP: char, const RN: u8>(
+        self,
+        _tx: Pin<TP, TN, Alternate<3>>,
+        _rx: Pin<RP, RN, Alternate<3>>,
+        config: Config,
+        clocks: &Clocks,
+        sim: &pac::Sim,
+    ) -> Serial<Self::Instance>;
+}
+
+macro_rules! uart_ext_impl {
+    ($PacType:ty, $Instance:ty, $clock_method:ident) => {
+        impl UartExt for $PacType {
+            type Instance = $Instance;
+
+            fn serial<const TP: char, const TN: u8, const RP: char, const RN: u8>(
+                self,
+                _tx: Pin<TP, TN, Alternate<3>>,
+                _rx: Pin<RP, RN, Alternate<3>>,
+                config: Config,
+                clocks: &Clocks,
+                sim: &pac::Sim,
+            ) -> Serial<$Instance> {
+                <$Instance as sealed::UartInstance>::enable_clock(sim);
+                Serial::<$Instance>::init(config, clocks.$clock_method().raw())
+            }
+        }
+    };
+}
+
+uart_ext_impl!(pac::Uart0, Uart0, core_clk);
+uart_ext_impl!(pac::Uart1, Uart1, core_clk);
+uart_ext_impl!(pac::Uart2, Uart2, bus_clk);

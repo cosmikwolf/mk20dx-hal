@@ -1,0 +1,6 @@
+[build]
+target = "thumbv7em-none-eabi"
+
+[target.thumbv7em-none-eabi]
+runner = "probe-rs run --chip MK20DX256xxx7"
+rustflags = ["-C", "link-arg=-Tlink.x"]

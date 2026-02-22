@@ -1,0 +1,31 @@
+[package]
+name = "mk20dx-hal"
+version = "0.1.0"
+edition = "2021"
+description = "Hardware Abstraction Layer for MK20DX128/MK20DX256 (Teensy 3.0/3.1/3.2)"
+license = "MIT OR Apache-2.0"
+rust-version = "1.76"
+categories = ["embedded", "hardware-support", "no-std"]
+keywords = ["arm", "cortex-m", "teensy", "kinetis", "nxp", "hal"]
+
+[dependencies]
+cortex-m = "0.7"
+cortex-m-rt = { version = "0.7", optional = true }
+embedded-hal = "1.0"
+embedded-hal-nb = "1.0"
+embedded-io = "0.6"
+nb = "1.1"
+fugit = "0.3"
+
+embedded-storage = "0.3"
+usb-device = "0.3"
+
+mk20d5 = { path = "../mk20dx-pac/mk20d5", optional = true }
+mk20d7 = { path = "../mk20dx-pac/mk20d7", optional = true }
+
+[features]
+default = ["mk20d7"]
+mk20d5 = ["dep:mk20d5"]
+mk20d7 = ["dep:mk20d7"]
+rt = ["cortex-m-rt", "mk20d5?/rt", "mk20d7?/rt"]
+critical-section = ["mk20d5?/critical-section", "mk20d7?/critical-section"]

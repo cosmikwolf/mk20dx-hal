@@ -447,3 +447,264 @@ macro_rules! uart_ext_impl {
 uart_ext_impl!(pac::Uart0, Uart0, core_clk);
 uart_ext_impl!(pac::Uart1, Uart1, core_clk);
 uart_ext_impl!(pac::Uart2, Uart2, bus_clk);
+
+// ----- Async support -----
+
+#[cfg(feature = "async")]
+mod async_impl {
+    use super::*;
+    use embassy_sync::waitqueue::AtomicWaker;
+
+    struct UartWakers {
+        rx: AtomicWaker,
+        tx: AtomicWaker,
+    }
+
+    static UART0_WAKERS: UartWakers = UartWakers {
+        rx: AtomicWaker::new(),
+        tx: AtomicWaker::new(),
+    };
+    static UART1_WAKERS: UartWakers = UartWakers {
+        rx: AtomicWaker::new(),
+        tx: AtomicWaker::new(),
+    };
+    static UART2_WAKERS: UartWakers = UartWakers {
+        rx: AtomicWaker::new(),
+        tx: AtomicWaker::new(),
+    };
+
+    fn wakers_for(ptr: *const pac::uart0::RegisterBlock) -> &'static UartWakers {
+        let addr = ptr as usize;
+        if addr == pac::Uart0::PTR as usize {
+            &UART0_WAKERS
+        } else if addr == pac::Uart1::PTR as usize {
+            &UART1_WAKERS
+        } else {
+            &UART2_WAKERS
+        }
+    }
+
+    fn on_uart_rx_tx_interrupt<UART: sealed::UartInstance>() {
+        let uart = regs::<UART>();
+        let s1 = uart.s1().read();
+        let wakers = wakers_for(UART::ptr());
+
+        // Wake RX task if data available or error
+        if s1.rdrf().is_1() || s1.or().is_1() || s1.fe().is_1() || s1.nf().is_1() || s1.pf().is_1()
+        {
+            wakers.rx.wake();
+        }
+        // Wake TX task if transmit buffer empty
+        if s1.tdre().is_1() {
+            // Disable TIE to prevent repeated firing until re-enabled
+            uart.c2().modify(|_, w| w.tie()._0());
+            wakers.tx.wake();
+        }
+        // Wake TX task if transmit complete (for flush)
+        if s1.tc().is_1() {
+            uart.c2().modify(|_, w| w.tcie()._0());
+            wakers.tx.wake();
+        }
+    }
+
+    /// Call from the `UART0_RX_TX` interrupt handler.
+    pub fn on_uart0_rx_tx_interrupt() {
+        on_uart_rx_tx_interrupt::<Uart0>();
+    }
+
+    /// Call from the `UART1_RX_TX` interrupt handler.
+    pub fn on_uart1_rx_tx_interrupt() {
+        on_uart_rx_tx_interrupt::<Uart1>();
+    }
+
+    /// Call from the `UART2_RX_TX` interrupt handler.
+    pub fn on_uart2_rx_tx_interrupt() {
+        on_uart_rx_tx_interrupt::<Uart2>();
+    }
+
+    // Note: embedded_io_async re-exports embedded_io::ErrorType,
+    // so the existing impls (outside this module) already satisfy the requirement.
+
+    // --- embedded_io_async::Read for Rx ---
+
+    impl<UART: sealed::UartInstance> embedded_io_async::Read for Rx<UART> {
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            if buf.is_empty() {
+                return Ok::<usize, Error>(0);
+            }
+            let wakers = wakers_for(UART::ptr());
+            let uart = regs::<UART>();
+            // Enable RX interrupt
+            uart.c2().modify(|_, w| w.rie()._1());
+            let result = core::future::poll_fn(|cx| {
+                wakers.rx.register(cx.waker());
+                match nb_read::<UART>() {
+                    Ok(byte) => core::task::Poll::Ready(Ok(byte)),
+                    Err(nb::Error::WouldBlock) => core::task::Poll::Pending,
+                    Err(nb::Error::Other(e)) => core::task::Poll::Ready(Err(e)),
+                }
+            })
+            .await;
+            uart.c2().modify(|_, w| w.rie()._0());
+            match result {
+                Ok(byte) => {
+                    buf[0] = byte;
+                    // Drain any additional available bytes without blocking
+                    let mut count = 1;
+                    while count < buf.len() {
+                        match nb_read::<UART>() {
+                            Ok(byte) => {
+                                buf[count] = byte;
+                                count += 1;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    Ok(count)
+                }
+                Err(e) => Err(e),
+            }
+        }
+    }
+
+    // --- embedded_io_async::Write for Tx ---
+
+    impl<UART: sealed::UartInstance> embedded_io_async::Write for Tx<UART> {
+        async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            if buf.is_empty() {
+                return Ok::<usize, Error>(0);
+            }
+            let wakers = wakers_for(UART::ptr());
+            let uart = regs::<UART>();
+            // Write first byte (may need to wait for TDRE)
+            core::future::poll_fn(|cx| {
+                wakers.tx.register(cx.waker());
+                match nb_write::<UART>(buf[0]) {
+                    Ok(()) => core::task::Poll::Ready(Ok(())),
+                    Err(nb::Error::WouldBlock) => {
+                        uart.c2().modify(|_, w| w.tie()._1());
+                        core::task::Poll::Pending
+                    }
+                    Err(nb::Error::Other(e)) => core::task::Poll::Ready(Err(e)),
+                }
+            })
+            .await?;
+            // Try to write remaining bytes without blocking
+            let mut count = 1;
+            while count < buf.len() {
+                match nb_write::<UART>(buf[count]) {
+                    Ok(()) => count += 1,
+                    Err(_) => break,
+                }
+            }
+            Ok(count)
+        }
+
+        async fn flush(&mut self) -> Result<(), Self::Error> {
+            let wakers = wakers_for(UART::ptr());
+            let uart = regs::<UART>();
+            core::future::poll_fn(|cx| {
+                wakers.tx.register(cx.waker());
+                match nb_flush::<UART>() {
+                    Ok(()) => core::task::Poll::Ready(Ok(())),
+                    Err(nb::Error::WouldBlock) => {
+                        uart.c2().modify(|_, w| w.tcie()._1());
+                        core::task::Poll::Pending
+                    }
+                    Err(nb::Error::Other(e)) => core::task::Poll::Ready(Err(e)),
+                }
+            })
+            .await
+        }
+    }
+
+    // --- embedded_io_async::Read/Write for Serial ---
+
+    impl<UART: sealed::UartInstance> embedded_io_async::Read for Serial<UART> {
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            if buf.is_empty() {
+                return Ok::<usize, Error>(0);
+            }
+            let wakers = wakers_for(UART::ptr());
+            let uart = regs::<UART>();
+            uart.c2().modify(|_, w| w.rie()._1());
+            let result = core::future::poll_fn(|cx| {
+                wakers.rx.register(cx.waker());
+                match nb_read::<UART>() {
+                    Ok(byte) => core::task::Poll::Ready(Ok(byte)),
+                    Err(nb::Error::WouldBlock) => core::task::Poll::Pending,
+                    Err(nb::Error::Other(e)) => core::task::Poll::Ready(Err(e)),
+                }
+            })
+            .await;
+            uart.c2().modify(|_, w| w.rie()._0());
+            match result {
+                Ok(byte) => {
+                    buf[0] = byte;
+                    let mut count = 1;
+                    while count < buf.len() {
+                        match nb_read::<UART>() {
+                            Ok(byte) => {
+                                buf[count] = byte;
+                                count += 1;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    Ok(count)
+                }
+                Err(e) => Err(e),
+            }
+        }
+    }
+
+    impl<UART: sealed::UartInstance> embedded_io_async::Write for Serial<UART> {
+        async fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
+            if buf.is_empty() {
+                return Ok(0);
+            }
+            let wakers = wakers_for(UART::ptr());
+            let uart = regs::<UART>();
+            core::future::poll_fn(|cx| {
+                wakers.tx.register(cx.waker());
+                match nb_write::<UART>(buf[0]) {
+                    Ok(()) => core::task::Poll::Ready(Ok(())),
+                    Err(nb::Error::WouldBlock) => {
+                        uart.c2().modify(|_, w| w.tie()._1());
+                        core::task::Poll::Pending
+                    }
+                    Err(nb::Error::Other(e)) => core::task::Poll::Ready(Err(e)),
+                }
+            })
+            .await?;
+            let mut count = 1;
+            while count < buf.len() {
+                match nb_write::<UART>(buf[count]) {
+                    Ok(()) => count += 1,
+                    Err(_) => break,
+                }
+            }
+            Ok(count)
+        }
+
+        async fn flush(&mut self) -> Result<(), Self::Error> {
+            let wakers = wakers_for(UART::ptr());
+            let uart = regs::<UART>();
+            core::future::poll_fn(|cx| {
+                wakers.tx.register(cx.waker());
+                match nb_flush::<UART>() {
+                    Ok(()) => core::task::Poll::Ready(Ok(())),
+                    Err(nb::Error::WouldBlock) => {
+                        uart.c2().modify(|_, w| w.tcie()._1());
+                        core::task::Poll::Pending
+                    }
+                    Err(nb::Error::Other(e)) => core::task::Poll::Ready(Err(e)),
+                }
+            })
+            .await
+        }
+    }
+}
+
+#[cfg(feature = "async")]
+pub use async_impl::{on_uart0_rx_tx_interrupt, on_uart1_rx_tx_interrupt, on_uart2_rx_tx_interrupt};

@@ -447,3 +447,260 @@ impl I2cExt for pac::I2c1 {
         I2c::<I2c1>::init(config, clocks.bus_clk().raw())
     }
 }
+
+// ----- Async support -----
+
+#[cfg(feature = "async")]
+mod async_impl {
+    use super::*;
+    use embassy_sync::waitqueue::AtomicWaker;
+
+    static I2C0_WAKER: AtomicWaker = AtomicWaker::new();
+    #[cfg(feature = "mk20d7")]
+    static I2C1_WAKER: AtomicWaker = AtomicWaker::new();
+
+    fn waker_for(ptr: *const pac::i2c0::RegisterBlock) -> &'static AtomicWaker {
+        if ptr as usize == pac::I2c0::PTR as usize {
+            &I2C0_WAKER
+        } else {
+            #[cfg(feature = "mk20d7")]
+            {
+                &I2C1_WAKER
+            }
+            #[cfg(not(feature = "mk20d7"))]
+            {
+                &I2C0_WAKER
+            }
+        }
+    }
+
+    fn on_i2c_interrupt(
+        i2c: &pac::i2c0::RegisterBlock,
+        waker: &AtomicWaker,
+    ) {
+        if i2c.s().read().iicif().is_1() {
+            // Disable interrupt to prevent re-triggering.
+            // Driver will read status and clear IICIF.
+            i2c.c1().modify(|_, w| w.iicie()._0());
+            waker.wake();
+        }
+    }
+
+    /// Call from the `I2C0` interrupt handler.
+    pub fn on_i2c0_interrupt() {
+        on_i2c_interrupt(unsafe { &*pac::I2c0::PTR }, &I2C0_WAKER);
+    }
+
+    /// Call from the `I2C1` interrupt handler (mk20d7 only).
+    #[cfg(feature = "mk20d7")]
+    pub fn on_i2c1_interrupt() {
+        on_i2c_interrupt(
+            unsafe { &*(pac::I2c1::PTR as *const pac::i2c0::RegisterBlock) },
+            &I2C1_WAKER,
+        );
+    }
+
+    // --- Async protocol helpers ---
+
+    impl<I2C: sealed::I2cInstance> I2c<I2C> {
+        /// Async version of wait_transfer: enables IICIE, awaits IICIF, checks ARBL.
+        async fn wait_transfer_async(&self) -> Result<(), Error> {
+            let i2c = regs::<I2C>();
+            let waker = waker_for(I2C::ptr());
+
+            // Enable I2C interrupt
+            i2c.c1().modify(|_, w| w.iicie()._1());
+
+            core::future::poll_fn(|cx| {
+                waker.register(cx.waker());
+                let s = i2c.s().read();
+                if s.iicif().is_1() {
+                    if s.arbl().is_1() {
+                        i2c.s().write(|w| w.arbl()._1().iicif()._1());
+                        core::task::Poll::Ready(Err(Error::ArbitrationLoss))
+                    } else {
+                        i2c.s().write(|w| w.iicif()._1());
+                        core::task::Poll::Ready(Ok(()))
+                    }
+                } else {
+                    // Re-enable interrupt (ISR disabled it on spurious wake)
+                    i2c.c1().modify(|_, w| w.iicie()._1());
+                    core::task::Poll::Pending
+                }
+            })
+            .await
+        }
+
+        async fn start_async(&self, addr: u8, read: bool) -> Result<(), Error> {
+            let i2c = regs::<I2C>();
+            // Spin-wait for bus idle (no interrupt for this, transitions are fast)
+            while i2c.s().read().busy().is_1() {}
+            i2c.c1().write(|w| w.iicen()._1().mst()._1().tx()._1());
+            let addr_byte = (addr << 1) | if read { 1 } else { 0 };
+            i2c.d().write(|w| unsafe { w.data().bits(addr_byte) });
+            self.wait_transfer_async().await?;
+            if i2c.s().read().rxak().is_1() {
+                return Err(Error::AddressNack);
+            }
+            Ok(())
+        }
+
+        async fn repeated_start_async(&self, addr: u8, read: bool) -> Result<(), Error> {
+            let i2c = regs::<I2C>();
+            i2c.c1().write(|w| {
+                w.iicen()._1().mst()._1().tx()._1().rsta().set_bit()
+            });
+            let addr_byte = (addr << 1) | if read { 1 } else { 0 };
+            i2c.d().write(|w| unsafe { w.data().bits(addr_byte) });
+            self.wait_transfer_async().await?;
+            if i2c.s().read().rxak().is_1() {
+                return Err(Error::AddressNack);
+            }
+            Ok(())
+        }
+
+        async fn write_bytes_async(&self, bytes: &[u8]) -> Result<(), Error> {
+            let i2c = regs::<I2C>();
+            for &byte in bytes {
+                i2c.d().write(|w| unsafe { w.data().bits(byte) });
+                self.wait_transfer_async().await?;
+                if i2c.s().read().rxak().is_1() {
+                    return Err(Error::DataNack);
+                }
+            }
+            Ok(())
+        }
+
+        async fn read_group_async(
+            &self,
+            ops: &mut [Operation<'_>],
+            generate_stop: bool,
+        ) -> Result<(), Error> {
+            let i2c = regs::<I2C>();
+
+            let total: usize = ops
+                .iter()
+                .map(|op| match op {
+                    Operation::Read(buf) => buf.len(),
+                    _ => 0,
+                })
+                .sum();
+
+            if total == 0 {
+                if generate_stop {
+                    self.stop();
+                }
+                return Ok(());
+            }
+
+            if total == 1 {
+                i2c.c1().write(|w| w.iicen()._1().mst()._1().txak()._1());
+            } else {
+                i2c.c1().write(|w| w.iicen()._1().mst()._1());
+            }
+
+            // Dummy read to trigger first receive
+            let _ = i2c.d().read();
+
+            let mut global = 0usize;
+            for op in ops.iter_mut() {
+                if let Operation::Read(buf) = op {
+                    for byte in buf.iter_mut() {
+                        self.wait_transfer_async().await?;
+
+                        if total > 1 && global == total - 2 {
+                            i2c.c1()
+                                .write(|w| w.iicen()._1().mst()._1().txak()._1());
+                        }
+
+                        if global == total - 1 {
+                            if generate_stop {
+                                self.stop();
+                            } else {
+                                i2c.c1()
+                                    .write(|w| w.iicen()._1().mst()._1().tx()._1());
+                            }
+                        }
+
+                        *byte = i2c.d().read().data().bits();
+                        global += 1;
+                    }
+                }
+            }
+
+            Ok(())
+        }
+
+        async fn do_transaction_async(
+            &mut self,
+            address: u8,
+            operations: &mut [Operation<'_>],
+        ) -> Result<(), Error> {
+            let mut i = 0;
+
+            while i < operations.len() {
+                let is_read = matches!(operations[i], Operation::Read(_));
+
+                let mut group_end = i + 1;
+                while group_end < operations.len()
+                    && matches!(operations[group_end], Operation::Read(_)) == is_read
+                {
+                    group_end += 1;
+                }
+
+                let is_last_group = group_end == operations.len();
+
+                if i == 0 {
+                    self.start_async(address, is_read).await?;
+                } else {
+                    self.repeated_start_async(address, is_read).await?;
+                }
+
+                if is_read {
+                    self.read_group_async(&mut operations[i..group_end], is_last_group)
+                        .await?;
+                } else {
+                    for op in &operations[i..group_end] {
+                        if let Operation::Write(bytes) = op {
+                            self.write_bytes_async(bytes).await?;
+                        }
+                    }
+                    if is_last_group {
+                        self.stop();
+                    }
+                }
+
+                i = group_end;
+            }
+
+            Ok(())
+        }
+    }
+
+    // --- embedded_hal_async::i2c::I2c ---
+
+    impl<I2C: sealed::I2cInstance> embedded_hal_async::i2c::I2c<SevenBitAddress> for I2c<I2C> {
+        async fn transaction(
+            &mut self,
+            address: u8,
+            operations: &mut [Operation<'_>],
+        ) -> Result<(), Self::Error> {
+            if operations.is_empty() {
+                return Ok(());
+            }
+
+            let result = self.do_transaction_async(address, operations).await;
+
+            if result.is_err() {
+                self.stop();
+            }
+
+            result
+        }
+    }
+}
+
+#[cfg(feature = "async")]
+pub use async_impl::on_i2c0_interrupt;
+#[cfg(all(feature = "async", feature = "mk20d7"))]
+pub use async_impl::on_i2c1_interrupt;

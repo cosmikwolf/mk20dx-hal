@@ -311,3 +311,146 @@ spi_impl!(pac::Spi0, Spi0, spi0_ctar, spi0_pushr, spi0);
 // Only mk20d7 has SPI1
 #[cfg(feature = "mk20d7")]
 spi_impl!(pac::Spi1, Spi1, spi1_ctar, spi1_pushr, spi1);
+
+// ----- Async support -----
+
+#[cfg(feature = "async")]
+mod async_impl {
+    use super::*;
+    use embassy_sync::waitqueue::AtomicWaker;
+
+    static SPI0_WAKER: AtomicWaker = AtomicWaker::new();
+    #[cfg(feature = "mk20d7")]
+    static SPI1_WAKER: AtomicWaker = AtomicWaker::new();
+
+    fn on_spi_interrupt(
+        spi: &pac::spi0::RegisterBlock,
+        waker: &AtomicWaker,
+    ) {
+        let sr = spi.sr().read();
+        if sr.tcf().is_1() {
+            // Clear TCF (w1c)
+            spi.sr().write(|w| w.tcf()._1());
+            // Disable TCF interrupt
+            spi.rser().modify(|_, w| w.tcf_re()._0());
+            waker.wake();
+        }
+    }
+
+    /// Call from the `SPI0` interrupt handler.
+    pub fn on_spi0_interrupt() {
+        on_spi_interrupt(unsafe { &*pac::Spi0::PTR }, &SPI0_WAKER);
+    }
+
+    /// Call from the `SPI1` interrupt handler (mk20d7 only).
+    #[cfg(feature = "mk20d7")]
+    pub fn on_spi1_interrupt() {
+        on_spi_interrupt(
+            unsafe { &*(pac::Spi1::PTR as *const pac::spi0::RegisterBlock) },
+            &SPI1_WAKER,
+        );
+    }
+
+    macro_rules! spi_async_impl {
+        ($Instance:ty, $PacType:ty, $pushr_fn:ident, $waker:expr) => {
+            impl Spi<$Instance> {
+                async fn transfer_byte_async(byte: u8) -> Result<u8, Error> {
+                    let spi = Self::regs();
+
+                    // Wait for TX FIFO space
+                    while spi.sr().read().tfff().is_0() {}
+                    spi.sr().write(|w| w.tfff()._1());
+
+                    // Push data with PCS0 asserted, CTAR0
+                    spi.$pushr_fn().write(|w| unsafe {
+                        w.txdata().bits(byte as u16).pcs()._1()
+                    });
+
+                    // Enable TCF interrupt and await transfer complete
+                    spi.rser().modify(|_, w| w.tcf_re()._1());
+                    core::future::poll_fn(|cx| {
+                        $waker.register(cx.waker());
+                        // Check if TCF_RE is disabled — means ISR already fired
+                        if spi.rser().read().tcf_re().is_0() {
+                            core::task::Poll::Ready(())
+                        } else if spi.sr().read().tcf().is_1() {
+                            // Race: TCF set but ISR hasn't run yet
+                            spi.sr().write(|w| w.tcf()._1());
+                            spi.rser().modify(|_, w| w.tcf_re()._0());
+                            core::task::Poll::Ready(())
+                        } else {
+                            core::task::Poll::Pending
+                        }
+                    })
+                    .await;
+
+                    // Check for RX overflow
+                    if spi.sr().read().rfof().is_1() {
+                        spi.sr().write(|w| w.rfof()._1());
+                        spi.sr().write(|w| w.rfdf()._1());
+                        let _ = spi.popr().read();
+                        return Err(Error::Overrun);
+                    }
+
+                    spi.sr().write(|w| w.rfdf()._1());
+                    Ok(spi.popr().read().rxdata().bits() as u8)
+                }
+            }
+
+            #[cfg(feature = "async")]
+            impl embedded_hal_async::spi::SpiBus<u8> for Spi<$Instance> {
+                async fn read(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
+                    for slot in buf.iter_mut() {
+                        *slot = Spi::<$Instance>::transfer_byte_async(0x00).await?;
+                    }
+                    Ok(())
+                }
+
+                async fn write(&mut self, buf: &[u8]) -> Result<(), Self::Error> {
+                    for &byte in buf {
+                        let _ = Spi::<$Instance>::transfer_byte_async(byte).await?;
+                    }
+                    Ok(())
+                }
+
+                async fn transfer(
+                    &mut self,
+                    read: &mut [u8],
+                    write: &[u8],
+                ) -> Result<(), Self::Error> {
+                    let len = read.len().max(write.len());
+                    for i in 0..len {
+                        let tx = write.get(i).copied().unwrap_or(0x00);
+                        let rx = Spi::<$Instance>::transfer_byte_async(tx).await?;
+                        if let Some(slot) = read.get_mut(i) {
+                            *slot = rx;
+                        }
+                    }
+                    Ok(())
+                }
+
+                async fn transfer_in_place(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
+                    for slot in buf.iter_mut() {
+                        *slot = Spi::<$Instance>::transfer_byte_async(*slot).await?;
+                    }
+                    Ok(())
+                }
+
+                async fn flush(&mut self) -> Result<(), Self::Error> {
+                    let spi = Spi::<$Instance>::regs();
+                    while spi.sr().read().txctr().bits() != 0 {}
+                    Ok(())
+                }
+            }
+        };
+    }
+
+    spi_async_impl!(Spi0, pac::Spi0, spi0_pushr, SPI0_WAKER);
+    #[cfg(feature = "mk20d7")]
+    spi_async_impl!(Spi1, pac::Spi1, spi1_pushr, SPI1_WAKER);
+}
+
+#[cfg(feature = "async")]
+pub use async_impl::on_spi0_interrupt;
+#[cfg(all(feature = "async", feature = "mk20d7"))]
+pub use async_impl::on_spi1_interrupt;

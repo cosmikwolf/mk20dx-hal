@@ -981,11 +981,63 @@ API: `CmpExt::cmp(plus, minus, sim)` → `Cmp<Instance>` with output reading, in
 
 ---
 
-## Phase 15+: Extended Peripherals (Future)
+## Phase 15: Async Support
 
-| Peripheral | Crate/Trait | Notes |
-|-----------|-------------|-------|
-| Async | `embedded-hal-async` | Async trait variants for all peripherals |
+### 15.1 Architecture
+
+The HAL uses a split-responsibility interrupt pattern:
+
+1. **HAL exports** `on_*_interrupt()` functions per peripheral — these clear hardware flags and wake `AtomicWaker`s
+2. **User writes** `#[interrupt]` handlers that call the HAL's functions
+3. **User unmasks** IRQs in the NVIC
+4. **Async trait impls** use `core::future::poll_fn` + `AtomicWaker::register`/wake pattern
+
+This avoids linker conflicts and gives users full control over interrupt priority and NVIC configuration. The pattern is used by embassy-stm32 and embassy-nrf.
+
+### 15.2 Dependencies
+
+```toml
+embassy-sync = { version = "0.6", optional = true }
+embedded-hal-async = { version = "1.0", optional = true }
+embedded-io-async = { version = "0.6", optional = true }
+
+[features]
+async = ["dep:embassy-sync", "dep:embedded-hal-async", "dep:embedded-io-async"]
+```
+
+### 15.3 Per-Peripheral Design
+
+**PIT Timer** (`timer.rs`): One `AtomicWaker` per channel (4 total). ISR clears TIF and disables TIE to prevent re-triggering. Future checks TIE=0 && TEN=1 as "ISR already fired" condition.
+
+**GPIO** (`gpio.rs`): One `AtomicWaker` per port (5 total) + one `AtomicU32` per port for per-pin pending flags. ISR reads ISFR, clears it (w1c), ORs into pending atomics, wakes. Level waits (high/low) re-check pin level on each poll. Edge waits use fetch_and to atomically check and clear their pin's pending bit.
+
+**DMA** (`dma.rs`): One `AtomicWaker` per channel (4 on mk20d5, 16 on mk20d7). ISR clears CINT, wakes. `wait_complete()` enables INTMAJOR, polls for DONE/ERROR.
+
+**UART** (`uart.rs`): Per-instance RX and TX `AtomicWaker`s. ISR checks S1 flags: wakes RX on RDRF/error, wakes TX on TDRE (disabling TIE) or TC (disabling TCIE). Async read waits for first byte via interrupt, then drains FIFO non-blockingly. Async write sends first byte via interrupt, then fills FIFO non-blockingly.
+
+**SPI** (`spi.rs`): Per-instance `AtomicWaker`. ISR clears TCF in SR, disables TCF_RE in RSER, wakes. Async transfer_byte: waits for TFFF (spin), pushes data, enables TCF_RE, awaits completion, reads POPR.
+
+**I2C** (`i2c.rs`): Per-instance `AtomicWaker`. ISR disables IICIE in C1 (does NOT clear IICIF — driver needs to read S register for ARBL/RXAK before clearing). Full async transaction mirrors blocking protocol: START → addr → data → STOP, with RSTART for direction changes.
+
+### 15.4 User Setup Example
+
+```rust
+use cortex_m_rt::interrupt;
+
+#[interrupt]
+fn PIT0() { mk20dx_hal::timer::on_pit0_interrupt(); }
+#[interrupt]
+fn UART0_RX_TX() { mk20dx_hal::uart::on_uart0_rx_tx_interrupt(); }
+#[interrupt]
+fn PORTA() { mk20dx_hal::gpio::on_porta_interrupt(); }
+
+// In main:
+unsafe {
+    cortex_m::peripheral::NVIC::unmask(pac::Interrupt::PIT0);
+    cortex_m::peripheral::NVIC::unmask(pac::Interrupt::UART0_RX_TX);
+    cortex_m::peripheral::NVIC::unmask(pac::Interrupt::PORTA);
+}
+```
 
 ---
 

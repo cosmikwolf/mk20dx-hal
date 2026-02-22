@@ -1,6 +1,6 @@
 # mk20dx-hal: Project Status
 
-**Last updated:** 2026-02-22 (Phase 14 DAC/RTC/CMP drivers)
+**Last updated:** 2026-02-22 (Phase 15 Async support)
 
 ---
 
@@ -365,11 +365,38 @@ Reference: K20 ref manual chapter 32 (CMP)
 
 ---
 
-## Phase 15+: Extended Peripherals — FUTURE
+## Phase 15: Async Support — COMPLETE
 
-| Peripheral | Status | Trait/Crate |
-|-----------|--------|-------------|
-| Async traits | Not started | `embedded-hal-async` |
+All async code is behind `#[cfg(feature = "async")]` and requires the `async` Cargo feature flag. The HAL exports `on_*_interrupt()` functions; users wire these to `#[interrupt]` handlers and unmask IRQs in the NVIC. Uses `embassy-sync` `AtomicWaker` for interrupt-to-task waking. Executor-agnostic (works with Embassy, RTIC, or any `core::task::Waker`-based executor).
+
+### Dependencies Added (optional, gated by `async` feature)
+
+| Crate | Version | Purpose |
+|-------|---------|---------|
+| `embassy-sync` | 0.6 | `AtomicWaker` for interrupt-driven waking |
+| `embedded-hal-async` | 1.0 | Async trait definitions (delay, digital, SPI, I2C) |
+| `embedded-io-async` | 0.6 | Async Read/Write traits (UART) |
+
+### Peripherals with Async Support
+
+| Module | Trait | Handler Functions | Notes |
+|--------|-------|-------------------|-------|
+| `timer.rs` | `embedded_hal_async::delay::DelayNs` | `on_pit{0-3}_interrupt()` | One AtomicWaker per PIT channel; ISR clears TIF, disables TIE |
+| `gpio.rs` | `embedded_hal_async::digital::Wait` | `on_port{a-e}_interrupt()` | Per-port AtomicWaker + AtomicU32 pending flags; IRQC configured per-wait |
+| `dma.rs` | `DmaChannel::wait_complete()` | `on_dma{0-15}_interrupt()` | Per-channel AtomicWaker; ISR clears CINT |
+| `uart.rs` | `embedded_io_async::Read/Write` | `on_uart{0-2}_rx_tx_interrupt()` | Per-UART RX+TX wakers; ISR disables TIE/TCIE after waking TX |
+| `spi.rs` | `embedded_hal_async::spi::SpiBus` | `on_spi{0,1}_interrupt()` | Per-instance AtomicWaker; uses TCF interrupt via RSER |
+| `i2c.rs` | `embedded_hal_async::i2c::I2c` | `on_i2c{0,1}_interrupt()` | Per-instance AtomicWaker; ISR disables IICIE, driver reads status |
+
+- [x] `Cargo.toml` — `async` feature flag with embassy-sync, embedded-hal-async, embedded-io-async
+- [x] `timer.rs` — Async PIT delay with per-channel wakers
+- [x] `gpio.rs` — Async GPIO Wait (rising/falling/any edge, high/low level) with per-port wakers + per-pin AtomicU32 pending flags
+- [x] `dma.rs` — Async DMA wait_complete with per-channel wakers (4 on mk20d5, 16 on mk20d7)
+- [x] `uart.rs` — Async serial Read/Write for Rx, Tx, and Serial types
+- [x] `spi.rs` — Async SpiBus (read, write, transfer, transfer_in_place, flush)
+- [x] `i2c.rs` — Async I2C transaction with full protocol (START, RSTART, ACK/NACK, STOP)
+- [x] All 4 build combinations compile: mk20d7, mk20d5, mk20d7+async, mk20d5+async
+- [x] Testsuite (blocking only) still compiles cleanly
 
 ---
 
@@ -385,3 +412,6 @@ Reference: K20 ref manual chapter 32 (CMP)
 | 2026-02-19 | Extension traits for peripheral init (not free functions) | Surveyed 9 HAL crates (stm32f4xx, stm32f1xx, stm32h7xx, nrf, rp2040, esp, atsamd, lpc8xx, imxrt); extension traits (`constrain`/`freeze`/`split`) are the dominant ecosystem pattern. Benefits: discoverability via IDE autocomplete, ecosystem consistency, ownership enforcement, prelude-friendly. |
 | 2026-02-21 | `defmt-test` v0.3 for hardware test harness (not `embedded-test`) | `embedded-test` v0.6/0.7 failed to compile on nightly 1.93.0 (missing modules, semihosting issues). `defmt-test` is stable, well-established, and integrates seamlessly with defmt logging. Trade-off: no per-test device reset (shared state), no `#[timeout]`/`#[should_panic]` attributes. |
 | 2026-02-21 | Separate test binaries per peripheral area (not monolithic) | Each test binary can be run independently, isolating failures. Loopback tests (requiring wiring) are separate from self-tests. |
+| 2026-02-22 | HAL exports `on_*_interrupt()` functions (not `#[interrupt]` handlers) | Avoids linker conflicts — user wires ISR to HAL handler. Standard pattern in embassy-stm32, embassy-nrf. |
+| 2026-02-22 | `embassy-sync` AtomicWaker for async (not custom waker) | Battle-tested, executor-agnostic, minimal footprint. Works with Embassy, RTIC, or bare executors. |
+| 2026-02-22 | Optional `async` feature flag (not always-on) | Keeps blocking-only builds dependency-free. Users opt in to embassy-sync + embedded-hal-async. |

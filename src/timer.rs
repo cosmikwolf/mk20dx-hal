@@ -150,3 +150,121 @@ impl PitExt for pac::Pit {
         }
     }
 }
+
+// ----- Async support -----
+
+#[cfg(feature = "async")]
+mod async_impl {
+    use super::*;
+    use core::future::Future;
+    use core::pin::Pin;
+    use core::task::{Context, Poll};
+    use embassy_sync::waitqueue::AtomicWaker;
+
+    static PIT_WAKERS: [AtomicWaker; 4] = [
+        AtomicWaker::new(),
+        AtomicWaker::new(),
+        AtomicWaker::new(),
+        AtomicWaker::new(),
+    ];
+
+    /// Call from the `PIT0` interrupt handler.
+    pub fn on_pit0_interrupt() {
+        on_pit_interrupt(0);
+    }
+
+    /// Call from the `PIT1` interrupt handler.
+    pub fn on_pit1_interrupt() {
+        on_pit_interrupt(1);
+    }
+
+    /// Call from the `PIT2` interrupt handler.
+    pub fn on_pit2_interrupt() {
+        on_pit_interrupt(2);
+    }
+
+    /// Call from the `PIT3` interrupt handler.
+    pub fn on_pit3_interrupt() {
+        on_pit_interrupt(3);
+    }
+
+    fn on_pit_interrupt(ch: usize) {
+        let pit = regs();
+        if pit.tflg(ch).read().tif().is_1() {
+            // Clear TIF flag (w1c)
+            pit.tflg(ch).write(|w| w.tif()._1());
+            // Disable interrupt to prevent repeated firing
+            pit.tctrl(ch).modify(|_, w| w.tie()._0());
+            PIT_WAKERS[ch].wake();
+        }
+    }
+
+    /// Future that resolves when a PIT channel's interrupt fires.
+    struct PitFuture<const CH: u8>;
+
+    impl<const CH: u8> Future for PitFuture<CH> {
+        type Output = ();
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            let ch = CH as usize;
+            PIT_WAKERS[ch].register(cx.waker());
+            let pit = regs();
+            // Check if already fired (TIE disabled by ISR means it completed)
+            if pit.tctrl(ch).read().tie().is_0() && pit.tctrl(ch).read().ten().is_1() {
+                // Timer is running but interrupt is disabled — ISR already fired
+                Poll::Ready(())
+            } else if pit.tflg(ch).read().tif().is_1() {
+                // Flag set but ISR hasn't run yet (race) — clear it ourselves
+                pit.tflg(ch).write(|w| w.tif()._1());
+                pit.tctrl(ch).modify(|_, w| w.tie()._0());
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        }
+    }
+
+    impl<const CH: u8> PitChannel<CH> {
+        /// Async one-shot delay in microseconds.
+        ///
+        /// Configures the PIT channel, enables its interrupt, and awaits
+        /// completion. The caller must wire the corresponding `PIT{N}`
+        /// interrupt to [`on_pitN_interrupt()`] and unmask it in the NVIC.
+        pub async fn delay_us(&mut self, us: u32) {
+            if us == 0 {
+                return;
+            }
+            let ticks = (us as u64 * self.bus_clk as u64 / 1_000_000)
+                .saturating_sub(1)
+                .min(u32::MAX as u64) as u32;
+            let pit = regs();
+            let ch = CH as usize;
+            // Stop → load → clear flag → enable with interrupt
+            pit.tctrl(ch).modify(|_, w| w.ten()._0());
+            pit.ldval(ch).write(|w| unsafe { w.tsv().bits(ticks) });
+            pit.tflg(ch).write(|w| w.tif()._1());
+            pit.tctrl(ch).write(|w| w.ten()._1().tie()._1());
+            PitFuture::<CH>.await;
+        }
+    }
+
+    impl<const CH: u8> embedded_hal_async::delay::DelayNs for PitChannel<CH> {
+        async fn delay_ns(&mut self, ns: u32) {
+            let us = (ns + 999) / 1000;
+            if us > 0 {
+                self.delay_us(us).await;
+            }
+        }
+
+        async fn delay_us(&mut self, us: u32) {
+            PitChannel::delay_us(self, us).await;
+        }
+
+        async fn delay_ms(&mut self, ms: u32) {
+            PitChannel::delay_us(self, ms.saturating_mul(1000)).await;
+        }
+    }
+}
+
+#[cfg(feature = "async")]
+pub use async_impl::{on_pit0_interrupt, on_pit1_interrupt, on_pit2_interrupt, on_pit3_interrupt};

@@ -676,3 +676,181 @@ impl DmaExt for pac::Dma {
         }
     }
 }
+
+// ----- Async support -----
+
+#[cfg(feature = "async")]
+mod async_impl {
+    use super::*;
+    use embassy_sync::waitqueue::AtomicWaker;
+
+    #[cfg(feature = "mk20d5")]
+    static DMA_WAKERS: [AtomicWaker; 4] = [
+        AtomicWaker::new(),
+        AtomicWaker::new(),
+        AtomicWaker::new(),
+        AtomicWaker::new(),
+    ];
+
+    #[cfg(feature = "mk20d7")]
+    static DMA_WAKERS: [AtomicWaker; 16] = [
+        AtomicWaker::new(),
+        AtomicWaker::new(),
+        AtomicWaker::new(),
+        AtomicWaker::new(),
+        AtomicWaker::new(),
+        AtomicWaker::new(),
+        AtomicWaker::new(),
+        AtomicWaker::new(),
+        AtomicWaker::new(),
+        AtomicWaker::new(),
+        AtomicWaker::new(),
+        AtomicWaker::new(),
+        AtomicWaker::new(),
+        AtomicWaker::new(),
+        AtomicWaker::new(),
+        AtomicWaker::new(),
+    ];
+
+    /// Call from a DMA channel interrupt handler. Clears the interrupt flag
+    /// and wakes the corresponding waker.
+    pub fn on_dma_interrupt(ch: u8) {
+        let dma = dma_regs();
+        // Clear interrupt request flag
+        dma.cint().write(|w| unsafe { w.cint().bits(ch) });
+        DMA_WAKERS[ch as usize].wake();
+    }
+
+    /// Call from the `DMA_CH0` interrupt handler.
+    pub fn on_dma0_interrupt() {
+        on_dma_interrupt(0);
+    }
+
+    /// Call from the `DMA_CH1` interrupt handler.
+    pub fn on_dma1_interrupt() {
+        on_dma_interrupt(1);
+    }
+
+    /// Call from the `DMA_CH2` interrupt handler.
+    pub fn on_dma2_interrupt() {
+        on_dma_interrupt(2);
+    }
+
+    /// Call from the `DMA_CH3` interrupt handler.
+    pub fn on_dma3_interrupt() {
+        on_dma_interrupt(3);
+    }
+
+    #[cfg(feature = "mk20d7")]
+    /// Call from the `DMA_CH4` interrupt handler.
+    pub fn on_dma4_interrupt() {
+        on_dma_interrupt(4);
+    }
+
+    #[cfg(feature = "mk20d7")]
+    /// Call from the `DMA_CH5` interrupt handler.
+    pub fn on_dma5_interrupt() {
+        on_dma_interrupt(5);
+    }
+
+    #[cfg(feature = "mk20d7")]
+    /// Call from the `DMA_CH6` interrupt handler.
+    pub fn on_dma6_interrupt() {
+        on_dma_interrupt(6);
+    }
+
+    #[cfg(feature = "mk20d7")]
+    /// Call from the `DMA_CH7` interrupt handler.
+    pub fn on_dma7_interrupt() {
+        on_dma_interrupt(7);
+    }
+
+    #[cfg(feature = "mk20d7")]
+    /// Call from the `DMA_CH8` interrupt handler.
+    pub fn on_dma8_interrupt() {
+        on_dma_interrupt(8);
+    }
+
+    #[cfg(feature = "mk20d7")]
+    /// Call from the `DMA_CH9` interrupt handler.
+    pub fn on_dma9_interrupt() {
+        on_dma_interrupt(9);
+    }
+
+    #[cfg(feature = "mk20d7")]
+    /// Call from the `DMA_CH10` interrupt handler.
+    pub fn on_dma10_interrupt() {
+        on_dma_interrupt(10);
+    }
+
+    #[cfg(feature = "mk20d7")]
+    /// Call from the `DMA_CH11` interrupt handler.
+    pub fn on_dma11_interrupt() {
+        on_dma_interrupt(11);
+    }
+
+    #[cfg(feature = "mk20d7")]
+    /// Call from the `DMA_CH12` interrupt handler.
+    pub fn on_dma12_interrupt() {
+        on_dma_interrupt(12);
+    }
+
+    #[cfg(feature = "mk20d7")]
+    /// Call from the `DMA_CH13` interrupt handler.
+    pub fn on_dma13_interrupt() {
+        on_dma_interrupt(13);
+    }
+
+    #[cfg(feature = "mk20d7")]
+    /// Call from the `DMA_CH14` interrupt handler.
+    pub fn on_dma14_interrupt() {
+        on_dma_interrupt(14);
+    }
+
+    #[cfg(feature = "mk20d7")]
+    /// Call from the `DMA_CH15` interrupt handler.
+    pub fn on_dma15_interrupt() {
+        on_dma_interrupt(15);
+    }
+
+    impl<const CH: u8> DmaChannel<CH> {
+        /// Await DMA transfer completion.
+        ///
+        /// Enables the major-loop-complete interrupt, waits for DONE or ERROR,
+        /// then disables the interrupt. The channel must already be configured
+        /// and started before calling this.
+        ///
+        /// The caller must wire the corresponding `DMA_CH{N}` interrupt to
+        /// [`on_dmaN_interrupt()`] and unmask it in the NVIC.
+        pub async fn wait_complete(&mut self) -> Result<(), DmaError> {
+            self.enable_interrupt();
+            let result = core::future::poll_fn(|cx| {
+                DMA_WAKERS[CH as usize].register(cx.waker());
+                if self.is_complete() {
+                    core::task::Poll::Ready(Ok(()))
+                } else if self.has_error() {
+                    core::task::Poll::Ready(Err(
+                        self.error_status().unwrap_or(DmaError::Cancelled),
+                    ))
+                } else {
+                    core::task::Poll::Pending
+                }
+            })
+            .await;
+            self.disable_interrupt();
+            self.clear_done();
+            result
+        }
+    }
+}
+
+#[cfg(feature = "async")]
+pub use async_impl::{
+    on_dma0_interrupt, on_dma1_interrupt, on_dma2_interrupt, on_dma3_interrupt, on_dma_interrupt,
+};
+#[cfg(all(feature = "async", feature = "mk20d7"))]
+pub use async_impl::{
+    on_dma10_interrupt, on_dma11_interrupt, on_dma12_interrupt, on_dma13_interrupt,
+    on_dma14_interrupt, on_dma15_interrupt, on_dma4_interrupt, on_dma5_interrupt,
+    on_dma6_interrupt, on_dma7_interrupt, on_dma8_interrupt, on_dma9_interrupt,
+};

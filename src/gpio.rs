@@ -311,3 +311,181 @@ gpio_port_impl!(
         (pe27, 27), (pe28, 28), (pe29, 29), (pe30, 30), (pe31, 31)
     ]
 );
+
+// ----- Async support -----
+
+#[cfg(feature = "async")]
+mod async_impl {
+    use super::*;
+    use core::sync::atomic::{AtomicU32, Ordering};
+    use embassy_sync::waitqueue::AtomicWaker;
+
+    /// One waker per port — all waiting pins on a port share a waker.
+    static PORT_WAKERS: [AtomicWaker; 5] = [
+        AtomicWaker::new(),
+        AtomicWaker::new(),
+        AtomicWaker::new(),
+        AtomicWaker::new(),
+        AtomicWaker::new(),
+    ];
+
+    /// Per-pin pending flags (one bit per pin, one u32 per port).
+    /// Set by ISR when a pin's interrupt fires, cleared by the Future.
+    static PORT_PENDING: [AtomicU32; 5] = [
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+        AtomicU32::new(0),
+    ];
+
+    const fn port_index(port: char) -> usize {
+        match port {
+            'A' => 0,
+            'B' => 1,
+            'C' => 2,
+            'D' => 3,
+            'E' => 4,
+            _ => panic!("Invalid GPIO port"),
+        }
+    }
+
+    fn on_port_interrupt(port: char) {
+        let port_regs = unsafe { &*port_ptr(port) };
+        // Read ISFR — each set bit indicates which pin(s) triggered
+        let isfr = port_regs.isfr().read().bits();
+        if isfr != 0 {
+            // Clear all pending flags (w1c)
+            port_regs.isfr().write(|w| unsafe { w.bits(isfr) });
+            // Record which pins fired
+            PORT_PENDING[port_index(port)].fetch_or(isfr, Ordering::SeqCst);
+            PORT_WAKERS[port_index(port)].wake();
+        }
+    }
+
+    /// Call from the `PORTA` interrupt handler.
+    pub fn on_porta_interrupt() {
+        on_port_interrupt('A');
+    }
+
+    /// Call from the `PORTB` interrupt handler.
+    pub fn on_portb_interrupt() {
+        on_port_interrupt('B');
+    }
+
+    /// Call from the `PORTC` interrupt handler.
+    pub fn on_portc_interrupt() {
+        on_port_interrupt('C');
+    }
+
+    /// Call from the `PORTD` interrupt handler.
+    pub fn on_portd_interrupt() {
+        on_port_interrupt('D');
+    }
+
+    /// Call from the `PORTE` interrupt handler.
+    pub fn on_porte_interrupt() {
+        on_port_interrupt('E');
+    }
+
+    impl<const PORT: char, const N: u8, PULL> embedded_hal_async::digital::Wait
+        for Pin<PORT, N, Input<PULL>>
+    {
+        async fn wait_for_high(&mut self) -> Result<(), Self::Error> {
+            core::future::poll_fn(|cx| {
+                PORT_WAKERS[port_index(PORT)].register(cx.waker());
+                if self.gpio().pdir().read().bits() & (1 << N) != 0 {
+                    // Already high — disable IRQC
+                    // Use isf()._0() to avoid w1c hazard on PCR.ISF
+                    self.port().pcr(N as usize).modify(|_, w| w.irqc()._0000().isf()._0());
+                    core::task::Poll::Ready(Ok(()))
+                } else {
+                    // Configure for rising edge interrupt
+                    self.port().pcr(N as usize).modify(|_, w| w.irqc()._1001().isf()._0());
+                    core::task::Poll::Pending
+                }
+            })
+            .await
+        }
+
+        async fn wait_for_low(&mut self) -> Result<(), Self::Error> {
+            core::future::poll_fn(|cx| {
+                PORT_WAKERS[port_index(PORT)].register(cx.waker());
+                if self.gpio().pdir().read().bits() & (1 << N) == 0 {
+                    self.port().pcr(N as usize).modify(|_, w| w.irqc()._0000().isf()._0());
+                    core::task::Poll::Ready(Ok(()))
+                } else {
+                    // Configure for falling edge interrupt
+                    self.port().pcr(N as usize).modify(|_, w| w.irqc()._1010().isf()._0());
+                    core::task::Poll::Pending
+                }
+            })
+            .await
+        }
+
+        async fn wait_for_rising_edge(&mut self) -> Result<(), Self::Error> {
+            // Clear any stale pending flag for this pin
+            PORT_PENDING[port_index(PORT)].fetch_and(!(1 << N), Ordering::SeqCst);
+            // Configure for rising edge interrupt
+            self.port().pcr(N as usize).modify(|_, w| w.irqc()._1001().isf()._0());
+
+            core::future::poll_fn(|cx| {
+                PORT_WAKERS[port_index(PORT)].register(cx.waker());
+                if PORT_PENDING[port_index(PORT)].fetch_and(!(1 << N), Ordering::SeqCst)
+                    & (1 << N)
+                    != 0
+                {
+                    self.port().pcr(N as usize).modify(|_, w| w.irqc()._0000().isf()._0());
+                    core::task::Poll::Ready(Ok(()))
+                } else {
+                    core::task::Poll::Pending
+                }
+            })
+            .await
+        }
+
+        async fn wait_for_falling_edge(&mut self) -> Result<(), Self::Error> {
+            PORT_PENDING[port_index(PORT)].fetch_and(!(1 << N), Ordering::SeqCst);
+            self.port().pcr(N as usize).modify(|_, w| w.irqc()._1010().isf()._0());
+
+            core::future::poll_fn(|cx| {
+                PORT_WAKERS[port_index(PORT)].register(cx.waker());
+                if PORT_PENDING[port_index(PORT)].fetch_and(!(1 << N), Ordering::SeqCst)
+                    & (1 << N)
+                    != 0
+                {
+                    self.port().pcr(N as usize).modify(|_, w| w.irqc()._0000().isf()._0());
+                    core::task::Poll::Ready(Ok(()))
+                } else {
+                    core::task::Poll::Pending
+                }
+            })
+            .await
+        }
+
+        async fn wait_for_any_edge(&mut self) -> Result<(), Self::Error> {
+            PORT_PENDING[port_index(PORT)].fetch_and(!(1 << N), Ordering::SeqCst);
+            self.port().pcr(N as usize).modify(|_, w| w.irqc()._1011().isf()._0());
+
+            core::future::poll_fn(|cx| {
+                PORT_WAKERS[port_index(PORT)].register(cx.waker());
+                if PORT_PENDING[port_index(PORT)].fetch_and(!(1 << N), Ordering::SeqCst)
+                    & (1 << N)
+                    != 0
+                {
+                    self.port().pcr(N as usize).modify(|_, w| w.irqc()._0000().isf()._0());
+                    core::task::Poll::Ready(Ok(()))
+                } else {
+                    core::task::Poll::Pending
+                }
+            })
+            .await
+        }
+    }
+}
+
+#[cfg(feature = "async")]
+pub use async_impl::{
+    on_porta_interrupt, on_portb_interrupt, on_portc_interrupt, on_portd_interrupt,
+    on_porte_interrupt,
+};

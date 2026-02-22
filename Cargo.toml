@@ -19,6 +19,9 @@ fugit = "0.3"
 
 embedded-storage = "0.3"
 usb-device = "0.3"
+embassy-sync = { version = "0.6", optional = true }
+embedded-hal-async = { version = "1.0", optional = true }
+embedded-io-async = { version = "0.6", optional = true }
 
 mk20d5 = { path = "../mk20dx-pac/mk20d5", optional = true }
 mk20d7 = { path = "../mk20dx-pac/mk20d7", optional = true }
@@ -29,3 +32,4 @@ mk20d5 = ["dep:mk20d5"]
 mk20d7 = ["dep:mk20d7"]
 rt = ["cortex-m-rt", "mk20d5?/rt", "mk20d7?/rt"]
 critical-section = ["mk20d5?/critical-section", "mk20d7?/critical-section"]
+async = ["dep:embassy-sync", "dep:embedded-hal-async", "dep:embedded-io-async"]

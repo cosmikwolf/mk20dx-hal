@@ -1,7 +1,7 @@
 use core::marker::PhantomData;
 
 use crate::clocks::Clocks;
-use crate::gpio::{Alternate, Pin};
+use crate::gpio::{Uart0TxPin, Uart0RxPin, Uart1TxPin, Uart1RxPin, Uart2TxPin, Uart2RxPin};
 use crate::pac;
 use crate::time::Hertz;
 
@@ -56,6 +56,7 @@ pub enum WordLength {
 
 /// UART communication error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Error {
     Overrun,
     Framing,
@@ -74,6 +75,19 @@ impl embedded_hal_nb::serial::Error for Error {
     }
 }
 
+impl core::fmt::Display for Error {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Error::Overrun => write!(f, "overrun"),
+            Error::Framing => write!(f, "framing error"),
+            Error::Parity => write!(f, "parity error"),
+            Error::Noise => write!(f, "noise detected"),
+        }
+    }
+}
+
+impl core::error::Error for Error {}
+
 impl embedded_io::Error for Error {
     fn kind(&self) -> embedded_io::ErrorKind {
         embedded_io::ErrorKind::Other
@@ -84,8 +98,15 @@ impl embedded_io::Error for Error {
 
 mod sealed {
     pub trait UartInstance {
+        type Pac;
         fn ptr() -> *const crate::pac::uart0::RegisterBlock;
         fn enable_clock(sim: &crate::pac::Sim);
+        /// Reconstruct the PAC peripheral (unsound if aliased).
+        unsafe fn steal_pac() -> Self::Pac;
+        /// DMAMUX source for UART TX.
+        fn dma_source_tx() -> crate::dma::DmaSource;
+        /// DMAMUX source for UART RX.
+        fn dma_source_rx() -> crate::dma::DmaSource;
     }
 }
 
@@ -97,15 +118,26 @@ pub struct Uart1;
 pub struct Uart2;
 
 impl sealed::UartInstance for Uart0 {
+    type Pac = pac::Uart0;
     fn ptr() -> *const pac::uart0::RegisterBlock {
         pac::Uart0::PTR
     }
     fn enable_clock(sim: &pac::Sim) {
         sim.scgc4().modify(|_, w| w.uart0()._1());
     }
+    unsafe fn steal_pac() -> pac::Uart0 {
+        pac::Uart0::steal()
+    }
+    fn dma_source_tx() -> crate::dma::DmaSource {
+        crate::dma::DmaSource::UART0_TX
+    }
+    fn dma_source_rx() -> crate::dma::DmaSource {
+        crate::dma::DmaSource::UART0_RX
+    }
 }
 
 impl sealed::UartInstance for Uart1 {
+    type Pac = pac::Uart1;
     fn ptr() -> *const pac::uart0::RegisterBlock {
         // Safety: UART1 and UART0 have identical register layouts through offset
         // 0x16 (rcfifo). The HAL only accesses registers within this range.
@@ -114,9 +146,19 @@ impl sealed::UartInstance for Uart1 {
     fn enable_clock(sim: &pac::Sim) {
         sim.scgc4().modify(|_, w| w.uart1()._1());
     }
+    unsafe fn steal_pac() -> pac::Uart1 {
+        pac::Uart1::steal()
+    }
+    fn dma_source_tx() -> crate::dma::DmaSource {
+        crate::dma::DmaSource::UART1_TX
+    }
+    fn dma_source_rx() -> crate::dma::DmaSource {
+        crate::dma::DmaSource::UART1_RX
+    }
 }
 
 impl sealed::UartInstance for Uart2 {
+    type Pac = pac::Uart2;
     fn ptr() -> *const pac::uart0::RegisterBlock {
         // Safety: UART2 and UART0 have identical register layouts through offset
         // 0x16 (rcfifo). The HAL only accesses registers within this range.
@@ -124,6 +166,15 @@ impl sealed::UartInstance for Uart2 {
     }
     fn enable_clock(sim: &pac::Sim) {
         sim.scgc4().modify(|_, w| w.uart2()._1());
+    }
+    unsafe fn steal_pac() -> pac::Uart2 {
+        pac::Uart2::steal()
+    }
+    fn dma_source_tx() -> crate::dma::DmaSource {
+        crate::dma::DmaSource::UART2_TX
+    }
+    fn dma_source_rx() -> crate::dma::DmaSource {
+        crate::dma::DmaSource::UART2_RX
     }
 }
 
@@ -216,6 +267,98 @@ impl<UART: sealed::UartInstance> Serial<UART> {
     /// Recombine TX and RX halves.
     pub fn join(_tx: Tx<UART>, _rx: Rx<UART>) -> Self {
         Serial { _uart: PhantomData }
+    }
+
+    /// Return the data register address for DMA configuration.
+    pub fn data_dma_addr() -> u32 {
+        UART::ptr() as u32 + 0x07 // D register offset
+    }
+
+    /// Start a DMA-backed write transfer.
+    ///
+    /// Configures the DMA channel to transmit `buf.len()` bytes via DMA.
+    /// The UART's TDMAS bit enables hardware DMA TX requests.
+    ///
+    /// Returns a [`DmaTransfer`](crate::dma::DmaTransfer) handle. Call
+    /// [`wait()`](crate::dma::DmaTransfer::wait) to block until complete.
+    pub fn write_dma<'a, const CH: u8>(
+        &'a mut self,
+        buf: &'a [u8],
+        ch: &'a mut crate::dma::DmaChannel<CH>,
+    ) -> crate::dma::DmaTransfer<'a, CH> {
+        let uart = regs::<UART>();
+
+        // Configure DMA: memory → UART D register
+        unsafe {
+            ch.configure_peripheral_write(
+                buf.as_ptr(),
+                Self::data_dma_addr(),
+                crate::dma::TransferSize::Bits8,
+                buf.len() as u16,
+            );
+        }
+
+        ch.set_source(UART::dma_source_tx());
+
+        // Enable DMA TX requests: C5.TDMAS=1, C2.TIE=1
+        uart.c5().modify(|_, w| w.tdmas()._1());
+        uart.c2().modify(|_, w| w.tie()._1());
+
+        ch.enable_request();
+
+        crate::dma::DmaTransfer { channel: ch }
+    }
+
+    /// Start a DMA-backed read transfer.
+    ///
+    /// Configures the DMA channel to receive `buf.len()` bytes via DMA.
+    /// The UART's RDMAS bit enables hardware DMA RX requests.
+    ///
+    /// Returns a [`DmaTransfer`](crate::dma::DmaTransfer) handle. Call
+    /// [`wait()`](crate::dma::DmaTransfer::wait) to block until complete.
+    pub fn read_dma<'a, const CH: u8>(
+        &'a mut self,
+        buf: &'a mut [u8],
+        ch: &'a mut crate::dma::DmaChannel<CH>,
+    ) -> crate::dma::DmaTransfer<'a, CH> {
+        let uart = regs::<UART>();
+
+        // Configure DMA: UART D register → memory
+        unsafe {
+            ch.configure_peripheral_read(
+                Self::data_dma_addr(),
+                buf.as_mut_ptr(),
+                crate::dma::TransferSize::Bits8,
+                buf.len() as u16,
+            );
+        }
+
+        ch.set_source(UART::dma_source_rx());
+
+        // Enable DMA RX requests: C5.RDMAS=1, C2.RIE=1
+        uart.c5().modify(|_, w| w.rdmas()._1());
+        uart.c2().modify(|_, w| w.rie()._1());
+
+        ch.enable_request();
+
+        crate::dma::DmaTransfer { channel: ch }
+    }
+
+    /// Release the UART peripheral, returning the PAC type.
+    ///
+    /// Disables the transmitter and receiver before releasing.
+    /// Pins are not returned since they were consumed during construction;
+    /// reconfigure them via the GPIO port after release.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure no other code holds a reference to this
+    /// peripheral's registers (e.g., via split TX/RX halves).
+    pub unsafe fn release(self) -> UART::Pac {
+        let uart = regs::<UART>();
+        // Disable TX and RX
+        uart.c2().write(|w| w.te()._0().re()._0());
+        UART::steal_pac()
     }
 }
 
@@ -411,13 +554,17 @@ impl<UART: sealed::UartInstance> embedded_io::Read for Rx<UART> {
 // ----- Extension Trait -----
 
 /// Extension trait for creating UART serial ports from PAC peripherals.
-pub trait UartExt: Sized {
+///
+/// Pin types are constrained by marker traits (e.g., [`Uart0TxPin`]) to
+/// ensure only valid pin assignments compile. See `gpio.rs` for the
+/// complete pin-peripheral mapping.
+pub trait UartExt<TX, RX>: Sized {
     type Instance: sealed::UartInstance;
 
-    fn serial<const TP: char, const TN: u8, const RP: char, const RN: u8>(
+    fn serial(
         self,
-        _tx: Pin<TP, TN, Alternate<3>>,
-        _rx: Pin<RP, RN, Alternate<3>>,
+        _tx: TX,
+        _rx: RX,
         config: Config,
         clocks: &Clocks,
         sim: &pac::Sim,
@@ -425,14 +572,14 @@ pub trait UartExt: Sized {
 }
 
 macro_rules! uart_ext_impl {
-    ($PacType:ty, $Instance:ty, $clock_method:ident) => {
-        impl UartExt for $PacType {
+    ($PacType:ty, $Instance:ty, $TxPin:ident, $RxPin:ident, $clock_method:ident) => {
+        impl<TX: $TxPin, RX: $RxPin> UartExt<TX, RX> for $PacType {
             type Instance = $Instance;
 
-            fn serial<const TP: char, const TN: u8, const RP: char, const RN: u8>(
+            fn serial(
                 self,
-                _tx: Pin<TP, TN, Alternate<3>>,
-                _rx: Pin<RP, RN, Alternate<3>>,
+                _tx: TX,
+                _rx: RX,
                 config: Config,
                 clocks: &Clocks,
                 sim: &pac::Sim,
@@ -444,9 +591,9 @@ macro_rules! uart_ext_impl {
     };
 }
 
-uart_ext_impl!(pac::Uart0, Uart0, core_clk);
-uart_ext_impl!(pac::Uart1, Uart1, core_clk);
-uart_ext_impl!(pac::Uart2, Uart2, bus_clk);
+uart_ext_impl!(pac::Uart0, Uart0, Uart0TxPin, Uart0RxPin, core_clk);
+uart_ext_impl!(pac::Uart1, Uart1, Uart1TxPin, Uart1RxPin, core_clk);
+uart_ext_impl!(pac::Uart2, Uart2, Uart2TxPin, Uart2RxPin, bus_clk);
 
 // ----- Async support -----
 

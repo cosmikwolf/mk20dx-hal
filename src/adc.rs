@@ -46,6 +46,7 @@ pub enum Averaging {
 
 /// ADC calibration failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct CalibrationError;
 
 // ----- Driver Type -----
@@ -79,7 +80,7 @@ pub trait AdcExt: Sized {
 // ----- Per-instance macro -----
 
 macro_rules! adc_impl {
-    ($PacType:ty, $Instance:ty, $scgc_reg:ident, $scgc_field:ident) => {
+    ($PacType:ty, $Instance:ty, $scgc_reg:ident, $scgc_field:ident, $dma_source:expr) => {
         impl Adc<$Instance> {
             fn regs() -> &'static <$PacType as core::ops::Deref>::Target {
                 unsafe { &*<$PacType>::PTR }
@@ -242,6 +243,66 @@ macro_rules! adc_impl {
                 // Read result
                 adc.r(0).read().d().bits()
             }
+
+            /// Release the ADC peripheral, returning the PAC type.
+            ///
+            /// Pins are not returned since they were consumed during construction.
+            ///
+            /// # Safety
+            ///
+            /// The caller must ensure no other code holds a reference to this
+            /// peripheral's registers.
+            pub unsafe fn release(self) -> $PacType {
+                <$PacType>::steal()
+            }
+
+            /// Return the result register (RA) address for DMA configuration.
+            pub fn result_dma_addr() -> u32 {
+                <$PacType>::PTR as u32 + 0x10 // R[0] (RA) offset
+            }
+
+            /// Start a DMA-backed multi-sample read.
+            ///
+            /// Configures the ADC for continuous conversion with DMA enabled.
+            /// Each conversion result is written to `results` via DMA.
+            /// The DMA major loop count equals `results.len()`.
+            ///
+            /// After the transfer completes, continuous mode and DMA are disabled.
+            ///
+            /// # Arguments
+            /// * `channel` — ADC input channel (0-23, or special channels).
+            /// * `results` — Buffer for conversion results (16-bit each).
+            /// * `ch` — DMA channel to use.
+            pub fn read_dma<'a, const DMA_CH: u8>(
+                &'a mut self,
+                channel: u8,
+                results: &'a mut [u16],
+                ch: &'a mut crate::dma::DmaChannel<DMA_CH>,
+            ) -> crate::dma::DmaTransfer<'a, DMA_CH> {
+                let adc = Self::regs();
+
+                // Enable DMA and continuous conversion
+                adc.sc2().modify(|_, w| w.dmaen()._1());
+                adc.sc3().write(|w| w.adco()._1());
+
+                // Configure DMA: ADC RA → memory buffer (16-bit)
+                unsafe {
+                    ch.configure_peripheral_read(
+                        Self::result_dma_addr(),
+                        results.as_mut_ptr() as *mut u8,
+                        crate::dma::TransferSize::Bits16,
+                        results.len() as u16,
+                    );
+                }
+
+                ch.set_source($dma_source);
+                ch.enable_request();
+
+                // Start first conversion
+                adc.sc1(0).write(|w| unsafe { w.adch().bits(channel & 0x1F) });
+
+                crate::dma::DmaTransfer { channel: ch }
+            }
         }
 
         impl AdcExt for $PacType {
@@ -256,8 +317,8 @@ macro_rules! adc_impl {
 }
 
 // Both variants have ADC0
-adc_impl!(pac::Adc0, Adc0, scgc6, adc0);
+adc_impl!(pac::Adc0, Adc0, scgc6, adc0, crate::dma::DmaSource::ADC0);
 
 // Only mk20d7 has ADC1
 #[cfg(feature = "mk20d7")]
-adc_impl!(pac::Adc1, Adc1, scgc3, adc1);
+adc_impl!(pac::Adc1, Adc1, scgc3, adc1, crate::dma::DmaSource::ADC1);

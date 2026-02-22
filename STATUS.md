@@ -1,6 +1,6 @@
 # mk20dx-hal: Project Status
 
-**Last updated:** 2026-02-22 (Phase 15 Async support)
+**Last updated:** 2026-02-22 (Phases 16-21 complete)
 
 ---
 
@@ -256,17 +256,31 @@ Reference: K20 ref manual chapter 34 (USB OTG / USB-FS)
 
 ---
 
-## Phase 12: Hardware Validation Test Suite — COMPLETE (code), PENDING (on-target execution)
+## Phase 12: Hardware Validation Test Suite — COMPLETE (blocking code), PENDING (async + on-target execution)
+
+### Blocking Tests (Complete)
 
 - [x] Test framework selection: `defmt-test` v0.3 with `probe-rs` runner
 - [x] Infrastructure: Cargo.toml, .cargo/config.toml, build.rs updated
 - [x] 10 self-test binaries (no external wiring): watchdog (3), clocks (6), gpio (8), delay (7), timer (10), adc (10), dma (11), pwm (7), i2c (4), usb (6)
+- [x] 10 additional self-test binaries (Phases 13-21): crc (7), dac (6), flash (6), eeprom (5), lptmr (8), rtc (8), cmp (7), power (3), llwu (5), pwm_advanced (9)
 - [x] 3 loopback test binaries (require wiring): gpio_loopback (2), uart_loopback (5), spi_loopback (7)
-- [x] All 13 test binaries compile cleanly (`cargo check --tests`)
+- [x] All 23 blocking test binaries compile cleanly (`cargo check --tests`)
+- [x] Makefile with `make self-tests`, `make loopback-tests`, `make all-tests`, `make check`
 - [ ] On-target execution of self-tests
 - [ ] On-target execution of loopback tests (with wiring)
 
-**Total: 79 tests across 13 binaries**
+### Async Tests (Planned)
+
+- [ ] 2 async self-test binaries (no wiring): async_timer (6), async_dma (5)
+- [ ] 4 async loopback test binaries (require wiring): async_gpio_loopback (5), async_uart_loopback (5), async_spi_loopback (7), async_i2c (4)
+- [ ] Minimal `block_on()` executor helper (SEV/WFE-based)
+- [ ] Interrupt handler wiring + NVIC unmask in each test binary
+- [ ] All 6 async test binaries compile cleanly
+- [ ] On-target execution of async self-tests
+- [ ] On-target execution of async loopback tests
+
+**Total: 175 tests across 29 binaries (143 blocking + 32 async)**
 
 ### Tests Requiring Additional Hardware (Not Implemented)
 
@@ -280,9 +294,8 @@ Reference: K20 ref manual chapter 34 (USB OTG / USB-FS)
 | UART baud rate accuracy | Logic analyzer |
 | DMA peripheral transfers | Peripheral-specific wiring |
 | SPI with real device | SPI flash or EEPROM |
-| Interrupt-driven operation | Embassy async integration |
 
-See STRATEGY.md Phase 12.4 for full details.
+See STRATEGY.md Phase 12.4–12.6 for full details.
 
 ---
 
@@ -317,7 +330,7 @@ Reference: K20 ref manual chapter 29 (FTFL)
 - [x] Init defaults: DACEN=1, VREF1 (VDDA), software trigger, buffer disabled, high power, output=0
 - [x] Entire module `#[cfg(feature = "mk20d7")]` — DAC0 not present on mk20d5
 - [x] No `Clocks` parameter needed
-- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/dac.rs` (5 tests, register-only)
+- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/dac.rs` (6 tests, register-only + value roundtrip)
 
 Reference: K20 ref manual chapter 33 (DAC)
 
@@ -336,7 +349,7 @@ Reference: K20 ref manual chapter 33 (DAC)
 - [x] Init: clock gate, clear SWR, enable oscillator (OSCE=1, SC8P+SC2P ~10pF), disable interrupts, start counter if valid
 - [x] No `Clocks` parameter (RTC uses independent 32.768 kHz oscillator)
 - [x] No `#[cfg]` needed — both mk20d5 and mk20d7 have identical RTC
-- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/rtc.rs` (7 tests, uses 32.768 kHz oscillator)
+- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/rtc.rs` (8 tests, uses 32.768 kHz oscillator)
 
 Reference: K20 ref manual chapter 23 (RTC)
 
@@ -359,7 +372,7 @@ Reference: K20 ref manual chapter 23 (RTC)
 - [x] SCR w1c hazard handled: all SCR writes use `write()` with manual config bit preservation
 - [x] CMP0 + CMP1 on both variants, CMP2 feature-gated behind `mk20d7`
 - [x] Shared clock gate (SIM SCGC4 CMP bit)
-- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/cmp.rs` (7 tests, internal DAC self-referencing)
+- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/cmp.rs` (7 tests, register-level, internal DAC self-referencing)
 
 Reference: K20 ref manual chapter 32 (CMP)
 
@@ -373,9 +386,9 @@ All async code is behind `#[cfg(feature = "async")]` and requires the `async` Ca
 
 | Crate | Version | Purpose |
 |-------|---------|---------|
-| `embassy-sync` | 0.6 | `AtomicWaker` for interrupt-driven waking |
+| `embassy-sync` | 0.7 | `AtomicWaker` for interrupt-driven waking |
 | `embedded-hal-async` | 1.0 | Async trait definitions (delay, digital, SPI, I2C) |
-| `embedded-io-async` | 0.6 | Async Read/Write traits (UART) |
+| `embedded-io-async` | 0.7 | Async Read/Write traits (UART) |
 
 ### Peripherals with Async Support
 
@@ -397,6 +410,122 @@ All async code is behind `#[cfg(feature = "async")]` and requires the `async` Ca
 - [x] `i2c.rs` — Async I2C transaction with full protocol (START, RSTART, ACK/NACK, STOP)
 - [x] All 4 build combinations compile: mk20d7, mk20d5, mk20d7+async, mk20d5+async
 - [x] Testsuite (blocking only) still compiles cleanly
+
+---
+
+## Phase 16: EEPROM / FlexMemory — COMPLETE
+
+- [x] `Eeprom` struct with FlexRAM memory-mapped read/write API (`src/eeprom.rs`)
+- [x] `FlashExt::flash()` returns `(Flash, Eeprom)` tuple (breaking change)
+- [x] FlexRAM EEPROM mode detection (`is_eee_enabled()` via FCNFG.EEERDY)
+- [x] Set FlexRAM function command (FTFL command 0x81)
+- [x] EEERDY polling for write completion
+- [x] `EepromError` enum (NotPartitioned, NotReady, OutOfBounds, AccessError, ProtectionViolation, CommandFailure)
+- [x] Byte-level read/write (`read`, `write`) and bulk (`read_slice`, `write_slice`)
+- [x] Unsafe partition command (`partition()` — one-time factory provisioning via FTFL command 0x80)
+- [x] `capacity()` returns configured EEPROM size
+- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/eeprom.rs` (5 tests, conditional on partition state)
+
+Reference: K20 ref manual chapter 29 (FTFL), chapter 30 (FlexMemory)
+
+---
+
+## Phase 17: Peripheral Improvements — COMPLETE
+
+### 17.1 defmt Feature Flag — COMPLETE
+
+- [x] `defmt = { version = "0.3", optional = true }` dependency
+- [x] `#[cfg_attr(feature = "defmt", derive(defmt::Format))]` on all error/status types
+- [x] Types covered: UART Error, SPI Error, I2C Error, DmaError, FlashError, CalibrationError, TimeInvalid, EepromError, all new enum types
+- [x] Builds with and without `defmt` feature
+
+### 17.2 Pin Validation Traits — COMPLETE
+
+- [x] Sealed marker traits per peripheral function (Uart0TxPin, Spi0SckPin, I2c0SclPin, etc.)
+- [x] Implementations for all valid pin-peripheral mappings from K20 reference manual ch10
+- [x] UART, SPI, I2C constructors constrained to valid pin types
+- [x] Compile-time rejection of invalid pin assignments
+
+### 17.3 release() Methods — COMPLETE
+
+- [x] `release()` on Serial<UART> (disables TE/RE, returns PAC type)
+- [x] `release()` on Spi<SPI> (halts + disables module, returns PAC type)
+- [x] `release()` on I2c<I2C> (disables IICEN, returns PAC type)
+- [x] `release()` on Adc<ADC> (returns PAC type)
+- [x] `release()` on Dac (disables DAC, returns pac::Dac0)
+- [x] `release()` on Rtc (leaves running, returns pac::Rtc)
+- [x] All release() methods are `unsafe` (caller must ensure no aliasing)
+
+---
+
+## Phase 18: DMA-Backed Peripheral Transfers — COMPLETE
+
+- [x] `DmaTransfer<'a, CH>` lifetime-safe handle with abort-on-drop (`src/dma.rs`)
+- [x] `is_complete()`, `has_error()`, `wait()` (blocks until done or error)
+- [x] SPI + DMA: `write_dma()` with DMAMUX routing (SPI0_TX/RX, SPI1_TX/RX)
+- [x] UART + DMA: `write_dma()`, `read_dma()` with DMAMUX routing (UART0-2 TX/RX)
+- [x] ADC + DMA: `read_dma()` continuous conversion with DMAMUX routing (ADC0, ADC1)
+- [x] Per-instance DMA source constants passed via macro parameters
+
+---
+
+## Phase 19: FTM Input Capture / Output Compare — COMPLETE
+
+- [x] `InputCapture<FTM, CH>` — configurable edge detection (rising/falling/both), capture(), wait(), interrupt control (`src/pwm.rs`)
+- [x] `OutputCompare<FTM, CH>` — toggle/set/clear on match, set_compare(), interrupt control
+- [x] `QuadratureDecoder<FTM>` — encoding modes (PhaseAB, count direction), count(), direction(), filter, polarity
+- [x] `sealed::FtmInstance` trait for code sharing across FTM0/1/2
+- [x] Enums: CaptureEdge, CompareAction, QuadMode, Direction (all with defmt support)
+- [x] QuadratureDecoder restricted to FTM1/FTM2 (only instances with QDCTRL)
+- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/pwm_advanced.rs` (9 tests, register-level OC/IC/Quad)
+
+Reference: K20 ref manual chapter 36 (FTM)
+
+---
+
+## Phase 20: Low-Power Modes — COMPLETE
+
+- [x] `PowerControl` driver wrapping SMC peripheral (`src/power.rs`)
+- [x] `SmcExt` extension trait on `pac::Smc`
+- [x] Wait mode (`enter_wait()` — WFI, wakes on any interrupt)
+- [x] Stop modes (`enter_stop()` — NormalStop, VLPS, LLS, VLLS1/2/3)
+- [x] VLPR mode entry/exit (`enter_vlpr()`, `exit_vlpr()`)
+- [x] Mode protection (`allow_vlp()`, `allow_lls()`, `allow_vlls()`, `allow_all()`)
+- [x] Stop abort detection (`stop_aborted()`)
+- [x] Current mode query (`current_mode()`)
+- [x] `Llwu` driver wrapping LLWU peripheral (`src/llwu.rs`)
+- [x] `LlwuExt` extension trait on `pac::Llwu`
+- [x] Pin wakeup source configuration (16 pins, rising/falling/any edge)
+- [x] Module wakeup source configuration (LPTMR, CMP0, CMP1, RTC Alarm, RTC Seconds)
+- [x] Wakeup flag reading and clearing (pin flags w1c, module flags read-only)
+- [x] MCG BLPI mode transitions (`enter_blpi()`, `exit_blpi()`) in `src/clocks.rs`
+- [x] `BlpiClocks` / `PeeState` types for type-safe mode management
+- [x] SIM clock divider adjustment for VLPR limits (4 MHz core, 1 MHz bus/flash)
+- [x] StopMode, PowerMode, WakeEdge, LlwuPin, LlwuModule enums (all with defmt support)
+- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/power.rs` (3 tests, initial state + config)
+- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/llwu.rs` (5 tests, register config)
+
+Reference: K20 ref manual chapters 6 (PMC), 7 (LLWU), 8 (RCM), 15 (SMC)
+
+---
+
+## Phase 21: Additional Peripherals — COMPLETE
+
+- [x] LPTMR (Low-Power Timer) driver (`src/lptmr.rs`)
+  - [x] `LptmrExt` extension trait on `pac::Lptmr0`
+  - [x] Time counter mode with configurable clock source (LPO 1kHz, ERCLK32K 32.768kHz, MCGIRCLK, OSCERCLK)
+  - [x] Prescaler control (bypass or divide by 2..65536)
+  - [x] `start()` with ms period, `start_raw()` for precise control
+  - [x] `wait()` → nb::Result polling, `cancel()`, `count()`
+  - [x] Interrupt enable/disable, flag clear
+  - [x] CNR write-to-latch pattern for correct counter reads
+- [x] CRC hardware accelerator driver (`src/crc_module.rs`)
+  - [x] `CrcExt` extension trait on `pac::Crc`
+  - [x] Configurable polynomial, seed, bit width (16/32), transpose modes
+  - [x] Preset configurations: `CrcConfig::crc16_ccitt()`, `CrcConfig::crc32()`
+  - [x] `configure()`, `feed()`, `result()`, `result_u16()`, `reset()`
+- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/crc.rs` (7 tests, known-vector CRC-16/CRC-32)
+- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/lptmr.rs` (8 tests, LPO 1kHz real-time)
 
 ---
 

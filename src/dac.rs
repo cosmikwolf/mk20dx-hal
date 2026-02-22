@@ -111,4 +111,18 @@ impl Dac {
         let dac = Self::regs();
         dac.c0().modify(|_, w| w.dacen()._0());
     }
+
+    /// Release the DAC peripheral, returning the PAC type.
+    ///
+    /// Disables the DAC output before releasing.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure no other code holds a reference to this
+    /// peripheral's registers.
+    pub unsafe fn release(self) -> pac::Dac0 {
+        let dac = Self::regs();
+        dac.c0().modify(|_, w| w.dacen()._0());
+        pac::Dac0::steal()
+    }
 }

@@ -1,8 +1,22 @@
+use core::convert::Infallible;
 use core::marker::PhantomData;
 
 use crate::clocks::Clocks;
 use crate::pac;
 use crate::time::Hertz;
+
+// ----- Instance Abstraction -----
+
+mod sealed {
+    pub trait FtmInstance {
+        fn ptr() -> *const crate::pac::ftm0::RegisterBlock;
+        fn enable_clock(sim: &crate::pac::Sim);
+    }
+}
+
+fn ftm_regs<FTM: sealed::FtmInstance>() -> &'static pac::ftm0::RegisterBlock {
+    unsafe { &*FTM::ptr() }
+}
 
 // ----- Instance Markers -----
 
@@ -15,6 +29,34 @@ pub struct Ftm1;
 /// Marker type for FTM2 (mk20d7 only).
 #[cfg(feature = "mk20d7")]
 pub struct Ftm2;
+
+impl sealed::FtmInstance for Ftm0 {
+    fn ptr() -> *const pac::ftm0::RegisterBlock {
+        pac::Ftm0::PTR
+    }
+    fn enable_clock(sim: &pac::Sim) {
+        sim.scgc6().modify(|_, w| w.ftm0()._1());
+    }
+}
+
+impl sealed::FtmInstance for Ftm1 {
+    fn ptr() -> *const pac::ftm0::RegisterBlock {
+        pac::Ftm1::PTR as *const pac::ftm0::RegisterBlock
+    }
+    fn enable_clock(sim: &pac::Sim) {
+        sim.scgc6().modify(|_, w| w.ftm1()._1());
+    }
+}
+
+#[cfg(feature = "mk20d7")]
+impl sealed::FtmInstance for Ftm2 {
+    fn ptr() -> *const pac::ftm0::RegisterBlock {
+        pac::Ftm2::PTR as *const pac::ftm0::RegisterBlock
+    }
+    fn enable_clock(sim: &pac::Sim) {
+        sim.scgc3().modify(|_, w| w.ftm2()._1());
+    }
+}
 
 // ----- Channel Type -----
 
@@ -204,3 +246,391 @@ ftm_pwm_impl!(pac::Ftm1, Ftm1, Ftm1Channels {
 ftm_pwm_impl!(pac::Ftm2, Ftm2, Ftm2Channels {
     ch0:0, ch1:1
 }, scgc3, ftm2);
+
+// =====================================================================
+// Input Capture
+// =====================================================================
+
+/// Edge detection mode for input capture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum CaptureEdge {
+    /// Capture on rising edge only.
+    Rising,
+    /// Capture on falling edge only.
+    Falling,
+    /// Capture on both rising and falling edges.
+    Both,
+}
+
+/// Input capture channel.
+///
+/// Captures the FTM counter value when the configured edge is detected
+/// on the channel input. Pin MUX must be configured separately.
+pub struct InputCapture<FTM, const CH: u8> {
+    _ftm: PhantomData<FTM>,
+}
+
+impl<FTM: sealed::FtmInstance, const CH: u8> InputCapture<FTM, CH> {
+    /// Configure a channel for input capture mode.
+    ///
+    /// The FTM must already be initialized (clock enabled, counter running).
+    /// Typically call this after `FtmExt::pwm()` or after manually configuring
+    /// the FTM counter via direct register access.
+    ///
+    /// # Arguments
+    /// * `edge` — Which edges trigger a capture.
+    /// * `clocks` — Clocks token (for clock gating).
+    /// * `sim` — SIM peripheral (for clock gating).
+    pub fn new(edge: CaptureEdge, clocks: &Clocks, sim: &pac::Sim) -> Self {
+        let _ = clocks;
+        FTM::enable_clock(sim);
+        let ftm = ftm_regs::<FTM>();
+
+        // Disable write protection
+        ftm.mode().modify(|_, w| w.wpdis()._1());
+
+        // Configure channel for input capture: MSB:MSA = 00
+        ftm.csc(CH as usize).write(|w| {
+            match edge {
+                CaptureEdge::Rising => w.elsa().set_bit(),
+                CaptureEdge::Falling => w.elsb().set_bit(),
+                CaptureEdge::Both => w.elsa().set_bit().elsb().set_bit(),
+            }
+        });
+
+        // Ensure counter is running (system clock, if not already set)
+        if ftm.sc().read().clks().is_none() {
+            ftm.sc().modify(|_, w| w.clks().system());
+        }
+
+        InputCapture { _ftm: PhantomData }
+    }
+
+    /// Read the last captured value if the channel flag is set.
+    ///
+    /// Returns `Some(value)` and clears the flag, or `None` if no capture
+    /// has occurred since the last read.
+    pub fn capture(&self) -> Option<u16> {
+        let ftm = ftm_regs::<FTM>();
+        if ftm.csc(CH as usize).read().chf().is_1() {
+            let val = ftm.cv(CH as usize).read().val().bits();
+            // Clear CHF by reading CnSC then writing 0 to CHF
+            // (CHF is cleared by reading CnSC when CHF is set, then writing 0)
+            ftm.csc(CH as usize).modify(|_, w| w);
+            Some(val)
+        } else {
+            None
+        }
+    }
+
+    /// Non-blocking poll for a capture event.
+    pub fn wait(&mut self) -> nb::Result<u16, Infallible> {
+        match self.capture() {
+            Some(val) => Ok(val),
+            None => Err(nb::Error::WouldBlock),
+        }
+    }
+
+    /// Enable the channel interrupt (CHIE).
+    pub fn enable_interrupt(&mut self) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.csc(CH as usize).modify(|_, w| w.chie().set_bit());
+    }
+
+    /// Disable the channel interrupt (CHIE).
+    pub fn disable_interrupt(&mut self) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.csc(CH as usize).modify(|_, w| w.chie().clear_bit());
+    }
+
+    /// Set the input filter value for this channel (0-15).
+    ///
+    /// Only channels 0-3 have hardware filters. Values for channels 4-7
+    /// are ignored.
+    pub fn set_filter(&mut self, value: u8) {
+        let ftm = ftm_regs::<FTM>();
+        let value = value & 0x0F;
+        match CH {
+            0 => { ftm.filter().modify(|_, w| unsafe { w.ch0fval().bits(value) }); },
+            1 => { ftm.filter().modify(|_, w| unsafe { w.ch1fval().bits(value) }); },
+            2 => { ftm.filter().modify(|_, w| unsafe { w.ch2fval().bits(value) }); },
+            3 => { ftm.filter().modify(|_, w| unsafe { w.ch3fval().bits(value) }); },
+            _ => {} // Channels 4-7 have no filter
+        }
+    }
+
+    /// Clear the channel flag (CHF).
+    pub fn clear_flag(&self) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.csc(CH as usize).modify(|_, w| w);
+    }
+}
+
+// =====================================================================
+// Output Compare
+// =====================================================================
+
+/// Action to perform when the counter matches the compare value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum CompareAction {
+    /// Toggle the channel output on match.
+    Toggle,
+    /// Clear the channel output on match (drive low).
+    Clear,
+    /// Set the channel output on match (drive high).
+    Set,
+}
+
+/// Output compare channel.
+///
+/// Performs an action on the channel output when the FTM counter matches
+/// the compare value. Pin MUX must be configured separately.
+pub struct OutputCompare<FTM, const CH: u8> {
+    _ftm: PhantomData<FTM>,
+}
+
+impl<FTM: sealed::FtmInstance, const CH: u8> OutputCompare<FTM, CH> {
+    /// Configure a channel for output compare mode.
+    ///
+    /// The FTM must already be initialized (clock enabled, counter running).
+    ///
+    /// # Arguments
+    /// * `action` — What to do when counter matches CnV.
+    /// * `compare` — Initial compare value.
+    /// * `clocks` — Clocks token.
+    /// * `sim` — SIM peripheral.
+    pub fn new(
+        action: CompareAction,
+        compare: u16,
+        clocks: &Clocks,
+        sim: &pac::Sim,
+    ) -> Self {
+        let _ = clocks;
+        FTM::enable_clock(sim);
+        let ftm = ftm_regs::<FTM>();
+
+        // Disable write protection
+        ftm.mode().modify(|_, w| w.wpdis()._1());
+
+        // Set compare value
+        ftm.cv(CH as usize).write(|w| unsafe { w.val().bits(compare) });
+
+        // Configure channel for output compare: MSB=0, MSA=1
+        ftm.csc(CH as usize).write(|w| {
+            let w = w.msa().set_bit();
+            match action {
+                CompareAction::Toggle => w.elsa().set_bit(),
+                CompareAction::Clear => w.elsb().set_bit(),
+                CompareAction::Set => w.elsa().set_bit().elsb().set_bit(),
+            }
+        });
+
+        // Ensure counter is running
+        if ftm.sc().read().clks().is_none() {
+            ftm.sc().modify(|_, w| w.clks().system());
+        }
+
+        OutputCompare { _ftm: PhantomData }
+    }
+
+    /// Set the compare value (CnV).
+    pub fn set_compare(&mut self, value: u16) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.cv(CH as usize).write(|w| unsafe { w.val().bits(value) });
+    }
+
+    /// Change the compare action.
+    pub fn set_action(&mut self, action: CompareAction) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.csc(CH as usize).modify(|r, w| {
+            // Preserve CHIE bit
+            let w = if r.chie().is_1() { w.chie().set_bit() } else { w };
+            let w = w.msa().set_bit();
+            match action {
+                CompareAction::Toggle => w.elsa().set_bit(),
+                CompareAction::Clear => w.elsb().set_bit(),
+                CompareAction::Set => w.elsa().set_bit().elsb().set_bit(),
+            }
+        });
+    }
+
+    /// Enable the channel interrupt (CHIE).
+    pub fn enable_interrupt(&mut self) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.csc(CH as usize).modify(|_, w| w.chie().set_bit());
+    }
+
+    /// Disable the channel interrupt (CHIE).
+    pub fn disable_interrupt(&mut self) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.csc(CH as usize).modify(|_, w| w.chie().clear_bit());
+    }
+
+    /// Check if the channel flag is set (match occurred).
+    pub fn has_matched(&self) -> bool {
+        let ftm = ftm_regs::<FTM>();
+        ftm.csc(CH as usize).read().chf().is_1()
+    }
+
+    /// Clear the channel flag (CHF).
+    pub fn clear_flag(&self) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.csc(CH as usize).modify(|_, w| w);
+    }
+}
+
+// =====================================================================
+// Quadrature Decoder
+// =====================================================================
+
+/// Quadrature decoder encoding mode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum QuadMode {
+    /// Phase A and Phase B encoding (standard quadrature).
+    PhaseAB,
+    /// Count and direction encoding (Phase A = clock, Phase B = direction).
+    CountDirection,
+}
+
+/// Counting direction reported by the quadrature decoder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum Direction {
+    /// Counter is incrementing.
+    Up,
+    /// Counter is decrementing.
+    Down,
+}
+
+/// Quadrature decoder using FTM Phase A (CH0) and Phase B (CH1) inputs.
+///
+/// All FTM instances support quadrature mode. Phase A uses the channel 0
+/// pin, Phase B uses the channel 1 pin. Pin MUX must be configured
+/// separately.
+pub struct QuadratureDecoder<FTM> {
+    _ftm: PhantomData<FTM>,
+}
+
+impl<FTM: sealed::FtmInstance> QuadratureDecoder<FTM> {
+    /// Configure the FTM for quadrature decoder mode.
+    ///
+    /// Enables the FTM clock gate, sets FTMEN and QUADEN, and configures
+    /// the encoding mode. The counter counts based on Phase A/B input edges.
+    ///
+    /// # Arguments
+    /// * `mode` — Quadrature encoding mode.
+    /// * `sim` — SIM peripheral for clock gating.
+    pub fn new(mode: QuadMode, sim: &pac::Sim) -> Self {
+        FTM::enable_clock(sim);
+        let ftm = ftm_regs::<FTM>();
+
+        // Disable counter
+        ftm.sc().write(|w| w.clks().none());
+
+        // Enable FTM features mode and disable write protection
+        ftm.mode().write(|w| w.ftmen()._1().wpdis()._1());
+
+        // Reset counter
+        ftm.cntin().write(|w| unsafe { w.init().bits(0) });
+        ftm.mod_().write(|w| unsafe { w.mod_().bits(0xFFFF) });
+        ftm.cnt().write(|w| unsafe { w.count().bits(0) });
+
+        // Configure quadrature decoder
+        ftm.qdctrl().write(|w| {
+            let w = w.quaden()._1();
+            match mode {
+                QuadMode::PhaseAB => w.quadmode()._0(),
+                QuadMode::CountDirection => w.quadmode()._1(),
+            }
+        });
+
+        QuadratureDecoder { _ftm: PhantomData }
+    }
+
+    /// Read the current counter value.
+    pub fn count(&self) -> u16 {
+        let ftm = ftm_regs::<FTM>();
+        ftm.cnt().read().count().bits()
+    }
+
+    /// Read the counting direction.
+    pub fn direction(&self) -> Direction {
+        let ftm = ftm_regs::<FTM>();
+        if ftm.qdctrl().read().quadir().is_1() {
+            Direction::Up
+        } else {
+            Direction::Down
+        }
+    }
+
+    /// Reset the counter to zero.
+    pub fn reset_count(&mut self) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.cnt().write(|w| unsafe { w.count().bits(0) });
+    }
+
+    /// Set the modulo value (counter wraps at MOD).
+    pub fn set_modulo(&mut self, modulo: u16) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.mod_().write(|w| unsafe { w.mod_().bits(modulo) });
+    }
+
+    /// Enable the timer overflow interrupt (TOIE).
+    pub fn enable_overflow_interrupt(&mut self) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.sc().modify(|_, w| w.toie()._1());
+    }
+
+    /// Disable the timer overflow interrupt (TOIE).
+    pub fn disable_overflow_interrupt(&mut self) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.sc().modify(|_, w| w.toie()._0());
+    }
+
+    /// Check and clear the timer overflow flag (TOF).
+    ///
+    /// Returns `true` if overflow occurred. The flag is cleared by the
+    /// read-modify-write cycle (reading SC when TOF=1, then writing 0
+    /// to the TOF bit position).
+    pub fn overflow_flag(&self) -> bool {
+        let ftm = ftm_regs::<FTM>();
+        let sc = ftm.sc().read();
+        let tof = sc.tof().is_1();
+        if tof {
+            // Clear TOF: modify() reads SC (TOF=1 seen), then writes back
+            // with TOF bit = 0 (since we don't set it), which clears it.
+            ftm.sc().modify(|_, w| w);
+        }
+        tof
+    }
+
+    /// Set input filter values for Phase A (CH0) and Phase B (CH1).
+    ///
+    /// Filter value 0 disables the filter. Values 1-15 set the filter
+    /// period to `value` bus clock cycles.
+    pub fn set_filter(&mut self, phase_a: u8, phase_b: u8) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.filter().modify(|_, w| unsafe {
+            w.ch0fval().bits(phase_a & 0x0F)
+             .ch1fval().bits(phase_b & 0x0F)
+        });
+        ftm.qdctrl().modify(|_, w| {
+            let w = if phase_a > 0 { w.phafltren()._1() } else { w.phafltren()._0() };
+            if phase_b > 0 { w.phbfltren()._1() } else { w.phbfltren()._0() }
+        });
+    }
+
+    /// Set input polarity for Phase A and Phase B.
+    ///
+    /// When `true`, the input is inverted (active-low).
+    pub fn set_polarity(&mut self, phase_a_invert: bool, phase_b_invert: bool) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.qdctrl().modify(|_, w| {
+            let w = if phase_a_invert { w.phapol()._1() } else { w.phapol()._0() };
+            if phase_b_invert { w.phbpol()._1() } else { w.phbpol()._0() }
+        });
+    }
+}

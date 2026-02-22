@@ -174,3 +174,171 @@ impl Mcg {
         clocks
     }
 }
+
+/// Saved PEE-mode MCG state for restoring after BLPI exit.
+///
+/// Created by [`enter_blpi`](Clocks::enter_blpi), consumed by
+/// [`exit_blpi`](Clocks::exit_blpi).
+pub struct PeeState {
+    core_clk: Hertz,
+    bus_clk: Hertz,
+    flash_clk: Hertz,
+}
+
+/// Reduced-frequency clocks for VLPR mode (BLPI).
+///
+/// In BLPI mode the MCG outputs the fast internal reference clock
+/// (up to 4 MHz). The `Clocks` token is consumed to prevent
+/// peripheral drivers from using stale frequency values.
+pub struct BlpiClocks {
+    core_clk: Hertz,
+    bus_clk: Hertz,
+    flash_clk: Hertz,
+}
+
+impl BlpiClocks {
+    /// Core clock frequency in BLPI mode.
+    pub fn core_clk(&self) -> Hertz {
+        self.core_clk
+    }
+
+    /// Bus clock frequency in BLPI mode.
+    pub fn bus_clk(&self) -> Hertz {
+        self.bus_clk
+    }
+
+    /// Flash clock frequency in BLPI mode.
+    pub fn flash_clk(&self) -> Hertz {
+        self.flash_clk
+    }
+}
+
+impl Clocks {
+    /// Transition MCG from PEE to BLPI for VLPR mode entry.
+    ///
+    /// MCG transition path: PEE → PBE → FBE → FBI → BLPI
+    ///
+    /// After this call, the core runs from the fast internal reference
+    /// clock (~4 MHz with FCRDIV=0, or divided down). SIM dividers are
+    /// adjusted so all clocks stay within VLPR limits.
+    ///
+    /// # VLPR Clock Limits (MK20DX)
+    /// - Core: max 4 MHz (mk20d7) / 2 MHz (mk20d5)
+    /// - Bus: max 1 MHz
+    /// - Flash: max 1 MHz
+    ///
+    /// Returns `BlpiClocks` (reduced-frequency token) and `PeeState`
+    /// (saved state for restoring PEE mode later).
+    pub fn enter_blpi(self, sim: &pac::Sim) -> (BlpiClocks, PeeState) {
+        let mcg = Self::mcg_regs();
+
+        // Save current frequencies for restoration
+        let saved = PeeState {
+            core_clk: self.core_clk,
+            bus_clk: self.bus_clk,
+            flash_clk: self.flash_clk,
+        };
+
+        // -- Step 1: PEE → PBE --
+        // Switch CLKS from FLL/PLL output to external reference
+        mcg.c1().modify(|_, w| w.clks().external());
+        // Wait for external clock source
+        while !mcg.s().read().clkst().is_10() {}
+
+        // -- Step 2: PBE → FBE --
+        // Deselect PLL
+        mcg.c6().modify(|_, w| w.plls()._0());
+        // Wait for FLL to be selected
+        while mcg.s().read().pllst().is_1() {}
+
+        // -- Step 3: FBE → FBI --
+        // Switch to internal reference clock
+        mcg.c1().modify(|_, w| w.clks().internal().irefs()._1());
+        // Wait for internal reference
+        while !mcg.s().read().clkst().is_01() {}
+        while !mcg.s().read().irefst().is_1() {}
+
+        // Select fast internal reference clock (~4 MHz undivided)
+        mcg.c2().modify(|_, w| w.ircs()._1());
+        // Wait for fast IRC selected
+        while !mcg.s().read().ircst().is_1() {}
+
+        // -- Step 4: FBI → BLPI --
+        // Set LP bit to disable FLL in bypass mode
+        mcg.c2().modify(|_, w| w.lp()._1());
+
+        // -- Step 5: Adjust SIM dividers for VLPR limits --
+        // Fast IRC = 4 MHz. Need core ≤ 4 MHz, bus ≤ 1 MHz, flash ≤ 1 MHz
+        sim.clkdiv1().write(|w| {
+            w.outdiv1()._0000()  // ÷1 → 4 MHz core
+             .outdiv2()._0011()  // ÷4 → 1 MHz bus
+             .outdiv4()._0011()  // ÷4 → 1 MHz flash
+        });
+
+        let blpi_clocks = BlpiClocks {
+            core_clk: Hertz::from_raw(4_000_000),
+            bus_clk: Hertz::from_raw(1_000_000),
+            flash_clk: Hertz::from_raw(1_000_000),
+        };
+
+        (blpi_clocks, saved)
+    }
+
+    /// Transition MCG from BLPI back to PEE (normal run mode).
+    ///
+    /// MCG transition path: BLPI → FBI → FBE → PBE → PEE
+    ///
+    /// Restores clock dividers and frequencies to the values saved
+    /// when [`enter_blpi`](Clocks::enter_blpi) was called.
+    pub fn exit_blpi(_blpi: BlpiClocks, saved: PeeState, sim: &pac::Sim) -> Clocks {
+        let mcg = Self::mcg_regs();
+
+        // -- Step 1: BLPI → FBI --
+        // Clear LP bit to re-enable FLL
+        mcg.c2().modify(|_, w| w.lp()._0());
+
+        // -- Step 2: FBI → FBE --
+        // Switch to external reference
+        mcg.c1().modify(|_, w| w.clks().external().irefs()._0());
+        // Wait for external reference
+        while !mcg.s().read().clkst().is_10() {}
+        while mcg.s().read().irefst().is_1() {}
+
+        // -- Step 3: Restore SIM dividers before PLL engagement --
+        #[cfg(feature = "mk20d7")]
+        sim.clkdiv1().write(|w| {
+            w.outdiv1()._0000()  // ÷1 → 72 MHz core
+             .outdiv2()._0001()  // ÷2 → 36 MHz bus
+             .outdiv4()._0010()  // ÷3 → 24 MHz flash
+        });
+        #[cfg(feature = "mk20d5")]
+        sim.clkdiv1().write(|w| {
+            w.outdiv1()._0000()  // ÷1 → 48 MHz core
+             .outdiv2()._0000()  // ÷1 → 48 MHz bus
+             .outdiv4()._0001()  // ÷2 → 24 MHz flash
+        });
+
+        // -- Step 4: FBE → PBE --
+        // Re-enable PLL
+        mcg.c6().modify(|_, w| w.plls()._1());
+        // Wait for PLL selected
+        while !mcg.s().read().pllst().is_1() {}
+        // Wait for PLL lock
+        while !mcg.s().read().lock0().is_1() {}
+
+        // -- Step 5: PBE → PEE --
+        mcg.c1().modify(|_, w| w.clks().fll_pll());
+        // Wait for PLL output as system clock
+        while !mcg.s().read().clkst().is_11() {}
+
+        Clocks {
+            core_clk: saved.core_clk,
+            bus_clk: saved.bus_clk,
+            flash_clk: saved.flash_clk,
+        }
+    }
+
+    fn mcg_regs() -> &'static pac::mcg::RegisterBlock {
+        unsafe { &*pac::Mcg::PTR }
+    }
+}

@@ -27,10 +27,10 @@ use embedded_storage::nor_flash::{
 // --- Hardware constants ---
 
 /// FTFL peripheral base address.
-const FTFL_BASE: u32 = 0x4002_0000;
+pub(crate) const FTFL_BASE: u32 = 0x4002_0000;
 
 /// FSTAT register address.
-const FTFL_FSTAT_ADDR: *mut u8 = FTFL_BASE as *mut u8;
+pub(crate) const FTFL_FSTAT_ADDR: *mut u8 = FTFL_BASE as *mut u8;
 
 /// Sector size: 2 KB (smallest erase unit).
 pub const SECTOR_SIZE: u32 = 2048;
@@ -53,23 +53,23 @@ const CMD_ERASE_SECTOR: u8 = 0x09;
 const CMD_PROGRAM_LONGWORD: u8 = 0x06;
 
 // FSTAT bit masks
-const FSTAT_CCIF: u8 = 0x80;
-const FSTAT_ACCERR: u8 = 0x20;
-const FSTAT_FPVIOL: u8 = 0x10;
-const FSTAT_MGSTAT0: u8 = 0x01;
+pub(crate) const FSTAT_CCIF: u8 = 0x80;
+pub(crate) const FSTAT_ACCERR: u8 = 0x20;
+pub(crate) const FSTAT_FPVIOL: u8 = 0x10;
+pub(crate) const FSTAT_MGSTAT0: u8 = 0x01;
 
 // FCCOB register offsets from FTFL_BASE.
 // Kinetis FCCOB layout is big-endian within each 4-byte group:
 //   [0x04] FCCOB3  [0x05] FCCOB2  [0x06] FCCOB1  [0x07] FCCOB0
 //   [0x08] FCCOB7  [0x09] FCCOB6  [0x0A] FCCOB5  [0x0B] FCCOB4
-const FCCOB0_OFFSET: u32 = 0x07; // Command code
-const FCCOB1_OFFSET: u32 = 0x06; // Address[23:16]
-const FCCOB2_OFFSET: u32 = 0x05; // Address[15:8]
-const FCCOB3_OFFSET: u32 = 0x04; // Address[7:0]
-const FCCOB4_OFFSET: u32 = 0x0B; // Data byte 0
-const FCCOB5_OFFSET: u32 = 0x0A; // Data byte 1
-const FCCOB6_OFFSET: u32 = 0x09; // Data byte 2
-const FCCOB7_OFFSET: u32 = 0x08; // Data byte 3
+pub(crate) const FCCOB0_OFFSET: u32 = 0x07; // Command code
+pub(crate) const FCCOB1_OFFSET: u32 = 0x06; // Address[23:16]
+pub(crate) const FCCOB2_OFFSET: u32 = 0x05; // Address[15:8]
+pub(crate) const FCCOB3_OFFSET: u32 = 0x04; // Address[7:0]
+pub(crate) const FCCOB4_OFFSET: u32 = 0x0B; // Data byte 0
+pub(crate) const FCCOB5_OFFSET: u32 = 0x0A; // Data byte 1
+pub(crate) const FCCOB6_OFFSET: u32 = 0x09; // Data byte 2
+pub(crate) const FCCOB7_OFFSET: u32 = 0x08; // Data byte 3
 
 // FPROT register base offset from FTFL_BASE.
 // [0x10] FPROT3 (lowest flash)  [0x11] FPROT2  [0x12] FPROT1  [0x13] FPROT0 (highest flash)
@@ -82,6 +82,7 @@ const FSEC_OFFSET: u32 = 0x02;
 
 /// Flash operation error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum FlashError {
     /// Address or length not properly aligned.
     NotAligned,
@@ -120,13 +121,16 @@ pub struct Flash {
 
 /// Extension trait for the FTFL peripheral.
 pub trait FlashExt {
-    /// Consume the PAC FTFL peripheral and return the flash driver.
-    fn flash(self) -> Flash;
+    /// Consume the PAC FTFL peripheral and return flash + EEPROM drivers.
+    ///
+    /// Both drivers share the FTFL controller. The `Flash` handles program
+    /// flash operations; the `Eeprom` handles FlexRAM/FlexNVM EEPROM.
+    fn flash(self) -> (Flash, crate::eeprom::Eeprom);
 }
 
 impl FlashExt for pac::Ftfl {
-    fn flash(self) -> Flash {
-        Flash { _ftfl: () }
+    fn flash(self) -> (Flash, crate::eeprom::Eeprom) {
+        (Flash { _ftfl: () }, crate::eeprom::Eeprom::new())
     }
 }
 
@@ -141,7 +145,7 @@ impl FlashExt for pac::Ftfl {
 /// Returns the FSTAT value after the command completes.
 #[inline(never)]
 #[link_section = ".data"]
-unsafe fn launch_command(ftfl_fstat: *mut u8) -> u8 {
+pub(crate) unsafe fn launch_command(ftfl_fstat: *mut u8) -> u8 {
     // Clear ACCERR + FPVIOL (w1c)
     ptr::write_volatile(ftfl_fstat, 0x30);
     // Launch command by writing CCIF=1
@@ -302,8 +306,12 @@ impl ReadNorFlash for Flash {
             return Err(FlashError::OutOfBounds);
         }
         // Flash is memory-mapped at 0x0000_0000 — direct read, no command needed.
-        unsafe {
-            ptr::copy_nonoverlapping(offset as *const u8, bytes.as_mut_ptr(), bytes.len());
+        // Use read_volatile instead of copy_nonoverlapping: volatile reads
+        // explicitly permit address 0 (valid flash on Cortex-M), whereas
+        // copy_nonoverlapping triggers nightly Rust's null-pointer UB check.
+        let src = offset as *const u8;
+        for (i, byte) in bytes.iter_mut().enumerate() {
+            *byte = unsafe { core::ptr::read_volatile(src.add(i)) };
         }
         Ok(())
     }

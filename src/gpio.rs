@@ -176,6 +176,230 @@ impl<const PORT: char, const N: u8, TYPE> embedded_hal::digital::StatefulOutputP
     }
 }
 
+// ----- Pin validation traits -----
+//
+// Sealed marker traits that constrain which pins can be used with each
+// peripheral function. Implementations are derived from the K20 signal
+// multiplexing table (reference manual chapter 10).
+
+mod sealed_pins {
+    pub trait Sealed {}
+}
+
+// UART pin traits
+
+/// Valid TX pin for UART0 (ALT3: PA2, PB17, PD7).
+pub trait Uart0TxPin: sealed_pins::Sealed {}
+/// Valid RX pin for UART0 (ALT3: PA1, PB16, PD6).
+pub trait Uart0RxPin: sealed_pins::Sealed {}
+/// Valid TX pin for UART1 (ALT3: PC4, PE0).
+pub trait Uart1TxPin: sealed_pins::Sealed {}
+/// Valid RX pin for UART1 (ALT3: PC3, PE1).
+pub trait Uart1RxPin: sealed_pins::Sealed {}
+/// Valid TX pin for UART2 (ALT3: PD3).
+pub trait Uart2TxPin: sealed_pins::Sealed {}
+/// Valid RX pin for UART2 (ALT3: PD2).
+pub trait Uart2RxPin: sealed_pins::Sealed {}
+
+impl sealed_pins::Sealed for Pin<'A', 2, Alternate<3>> {}
+impl Uart0TxPin for Pin<'A', 2, Alternate<3>> {}
+impl sealed_pins::Sealed for Pin<'B', 17, Alternate<3>> {}
+impl Uart0TxPin for Pin<'B', 17, Alternate<3>> {}
+impl sealed_pins::Sealed for Pin<'D', 7, Alternate<3>> {}
+impl Uart0TxPin for Pin<'D', 7, Alternate<3>> {}
+
+impl sealed_pins::Sealed for Pin<'A', 1, Alternate<3>> {}
+impl Uart0RxPin for Pin<'A', 1, Alternate<3>> {}
+impl sealed_pins::Sealed for Pin<'B', 16, Alternate<3>> {}
+impl Uart0RxPin for Pin<'B', 16, Alternate<3>> {}
+impl sealed_pins::Sealed for Pin<'D', 6, Alternate<3>> {}
+impl Uart0RxPin for Pin<'D', 6, Alternate<3>> {}
+
+impl sealed_pins::Sealed for Pin<'C', 4, Alternate<3>> {}
+impl Uart1TxPin for Pin<'C', 4, Alternate<3>> {}
+impl sealed_pins::Sealed for Pin<'E', 0, Alternate<3>> {}
+impl Uart1TxPin for Pin<'E', 0, Alternate<3>> {}
+
+impl sealed_pins::Sealed for Pin<'C', 3, Alternate<3>> {}
+impl Uart1RxPin for Pin<'C', 3, Alternate<3>> {}
+impl sealed_pins::Sealed for Pin<'E', 1, Alternate<3>> {}
+impl Uart1RxPin for Pin<'E', 1, Alternate<3>> {}
+
+impl sealed_pins::Sealed for Pin<'D', 3, Alternate<3>> {}
+impl Uart2TxPin for Pin<'D', 3, Alternate<3>> {}
+
+impl sealed_pins::Sealed for Pin<'D', 2, Alternate<3>> {}
+impl Uart2RxPin for Pin<'D', 2, Alternate<3>> {}
+
+// SPI pin traits
+
+/// Valid SCK pin for SPI0 (ALT2: PC5, PD1).
+pub trait Spi0SckPin: sealed_pins::Sealed {}
+/// Valid MOSI (SOUT) pin for SPI0 (ALT2: PC6, PD2).
+pub trait Spi0MosiPin: sealed_pins::Sealed {}
+/// Valid MISO (SIN) pin for SPI0 (ALT2: PC7, PD3).
+pub trait Spi0MisoPin: sealed_pins::Sealed {}
+
+impl sealed_pins::Sealed for Pin<'C', 5, Alternate<2>> {}
+impl Spi0SckPin for Pin<'C', 5, Alternate<2>> {}
+impl sealed_pins::Sealed for Pin<'D', 1, Alternate<2>> {}
+impl Spi0SckPin for Pin<'D', 1, Alternate<2>> {}
+
+impl sealed_pins::Sealed for Pin<'C', 6, Alternate<2>> {}
+impl Spi0MosiPin for Pin<'C', 6, Alternate<2>> {}
+impl sealed_pins::Sealed for Pin<'D', 2, Alternate<2>> {}
+impl Spi0MosiPin for Pin<'D', 2, Alternate<2>> {}
+
+impl sealed_pins::Sealed for Pin<'C', 7, Alternate<2>> {}
+impl Spi0MisoPin for Pin<'C', 7, Alternate<2>> {}
+impl sealed_pins::Sealed for Pin<'D', 3, Alternate<2>> {}
+impl Spi0MisoPin for Pin<'D', 3, Alternate<2>> {}
+
+/// Valid SCK pin for SPI1 (ALT2: PE2, mk20d7 only).
+#[cfg(feature = "mk20d7")]
+pub trait Spi1SckPin: sealed_pins::Sealed {}
+/// Valid MOSI (SOUT) pin for SPI1 (ALT2: PE1, mk20d7 only).
+#[cfg(feature = "mk20d7")]
+pub trait Spi1MosiPin: sealed_pins::Sealed {}
+/// Valid MISO (SIN) pin for SPI1 (ALT2: PE3, mk20d7 only).
+#[cfg(feature = "mk20d7")]
+pub trait Spi1MisoPin: sealed_pins::Sealed {}
+
+#[cfg(feature = "mk20d7")]
+impl sealed_pins::Sealed for Pin<'E', 2, Alternate<2>> {}
+#[cfg(feature = "mk20d7")]
+impl Spi1SckPin for Pin<'E', 2, Alternate<2>> {}
+
+#[cfg(feature = "mk20d7")]
+impl sealed_pins::Sealed for Pin<'E', 1, Alternate<2>> {}
+#[cfg(feature = "mk20d7")]
+impl Spi1MosiPin for Pin<'E', 1, Alternate<2>> {}
+
+#[cfg(feature = "mk20d7")]
+impl sealed_pins::Sealed for Pin<'E', 3, Alternate<2>> {}
+#[cfg(feature = "mk20d7")]
+impl Spi1MisoPin for Pin<'E', 3, Alternate<2>> {}
+
+// I2C pin traits
+
+/// Valid SCL pin for I2C0 (ALT2: PB0, PB2).
+pub trait I2c0SclPin: sealed_pins::Sealed {}
+/// Valid SDA pin for I2C0 (ALT2: PB1, PB3).
+pub trait I2c0SdaPin: sealed_pins::Sealed {}
+
+impl sealed_pins::Sealed for Pin<'B', 0, Alternate<2>> {}
+impl I2c0SclPin for Pin<'B', 0, Alternate<2>> {}
+impl sealed_pins::Sealed for Pin<'B', 2, Alternate<2>> {}
+impl I2c0SclPin for Pin<'B', 2, Alternate<2>> {}
+
+impl sealed_pins::Sealed for Pin<'B', 1, Alternate<2>> {}
+impl I2c0SdaPin for Pin<'B', 1, Alternate<2>> {}
+impl sealed_pins::Sealed for Pin<'B', 3, Alternate<2>> {}
+impl I2c0SdaPin for Pin<'B', 3, Alternate<2>> {}
+
+/// Valid SCL pin for I2C1 (ALT2: PC10, mk20d7 only).
+#[cfg(feature = "mk20d7")]
+pub trait I2c1SclPin: sealed_pins::Sealed {}
+/// Valid SDA pin for I2C1 (ALT2: PC11, mk20d7 only).
+#[cfg(feature = "mk20d7")]
+pub trait I2c1SdaPin: sealed_pins::Sealed {}
+
+#[cfg(feature = "mk20d7")]
+impl sealed_pins::Sealed for Pin<'C', 10, Alternate<2>> {}
+#[cfg(feature = "mk20d7")]
+impl I2c1SclPin for Pin<'C', 10, Alternate<2>> {}
+
+#[cfg(feature = "mk20d7")]
+impl sealed_pins::Sealed for Pin<'C', 11, Alternate<2>> {}
+#[cfg(feature = "mk20d7")]
+impl I2c1SdaPin for Pin<'C', 11, Alternate<2>> {}
+
+// FTM channel pin traits
+
+/// Valid pin for FTM0 channel 0 (ALT3: PA3, ALT4: PC1).
+pub trait Ftm0Ch0Pin: sealed_pins::Sealed {}
+/// Valid pin for FTM0 channel 1 (ALT3: PA4, ALT4: PC2).
+pub trait Ftm0Ch1Pin: sealed_pins::Sealed {}
+/// Valid pin for FTM0 channel 2 (ALT3: PA5, ALT4: PC3).
+pub trait Ftm0Ch2Pin: sealed_pins::Sealed {}
+/// Valid pin for FTM0 channel 3 (ALT4: PC4).
+pub trait Ftm0Ch3Pin: sealed_pins::Sealed {}
+/// Valid pin for FTM0 channel 4 (ALT4: PD4).
+pub trait Ftm0Ch4Pin: sealed_pins::Sealed {}
+/// Valid pin for FTM0 channel 5 (ALT3: PA0, ALT4: PD5).
+pub trait Ftm0Ch5Pin: sealed_pins::Sealed {}
+/// Valid pin for FTM0 channel 6 (ALT3: PA1, ALT4: PD6).
+pub trait Ftm0Ch6Pin: sealed_pins::Sealed {}
+/// Valid pin for FTM0 channel 7 (ALT3: PA2, ALT4: PD7).
+pub trait Ftm0Ch7Pin: sealed_pins::Sealed {}
+
+impl sealed_pins::Sealed for Pin<'A', 3, Alternate<3>> {}
+impl Ftm0Ch0Pin for Pin<'A', 3, Alternate<3>> {}
+impl sealed_pins::Sealed for Pin<'C', 1, Alternate<4>> {}
+impl Ftm0Ch0Pin for Pin<'C', 1, Alternate<4>> {}
+
+impl sealed_pins::Sealed for Pin<'A', 4, Alternate<3>> {}
+impl Ftm0Ch1Pin for Pin<'A', 4, Alternate<3>> {}
+impl sealed_pins::Sealed for Pin<'C', 2, Alternate<4>> {}
+impl Ftm0Ch1Pin for Pin<'C', 2, Alternate<4>> {}
+
+impl sealed_pins::Sealed for Pin<'A', 5, Alternate<3>> {}
+impl Ftm0Ch2Pin for Pin<'A', 5, Alternate<3>> {}
+impl sealed_pins::Sealed for Pin<'C', 3, Alternate<4>> {}
+impl Ftm0Ch2Pin for Pin<'C', 3, Alternate<4>> {}
+
+impl sealed_pins::Sealed for Pin<'C', 4, Alternate<4>> {}
+impl Ftm0Ch3Pin for Pin<'C', 4, Alternate<4>> {}
+
+impl sealed_pins::Sealed for Pin<'D', 4, Alternate<4>> {}
+impl Ftm0Ch4Pin for Pin<'D', 4, Alternate<4>> {}
+
+impl sealed_pins::Sealed for Pin<'A', 0, Alternate<3>> {}
+impl Ftm0Ch5Pin for Pin<'A', 0, Alternate<3>> {}
+impl sealed_pins::Sealed for Pin<'D', 5, Alternate<4>> {}
+impl Ftm0Ch5Pin for Pin<'D', 5, Alternate<4>> {}
+
+impl Ftm0Ch6Pin for Pin<'A', 1, Alternate<3>> {} // A1 ALT3 already sealed above for Uart0RxPin
+impl sealed_pins::Sealed for Pin<'D', 6, Alternate<4>> {}
+impl Ftm0Ch6Pin for Pin<'D', 6, Alternate<4>> {}
+
+impl Ftm0Ch7Pin for Pin<'A', 2, Alternate<3>> {} // A2 ALT3 already sealed above for Uart0TxPin
+impl Ftm0Ch7Pin for Pin<'D', 7, Alternate<3>> {} // D7 ALT3 already sealed above for Uart0TxPin
+
+/// Valid pin for FTM1 channel 0 (ALT3: PA12, PB0).
+pub trait Ftm1Ch0Pin: sealed_pins::Sealed {}
+/// Valid pin for FTM1 channel 1 (ALT3: PA13, PB1).
+pub trait Ftm1Ch1Pin: sealed_pins::Sealed {}
+
+impl sealed_pins::Sealed for Pin<'A', 12, Alternate<3>> {}
+impl Ftm1Ch0Pin for Pin<'A', 12, Alternate<3>> {}
+impl Ftm1Ch0Pin for Pin<'B', 0, Alternate<3>> {} // B0 ALT2 sealed above, but ALT3 is different
+
+// PB0 ALT3 needs its own sealed impl since PB0 ALT2 was already sealed
+impl sealed_pins::Sealed for Pin<'B', 0, Alternate<3>> {}
+
+impl sealed_pins::Sealed for Pin<'A', 13, Alternate<3>> {}
+impl Ftm1Ch1Pin for Pin<'A', 13, Alternate<3>> {}
+impl sealed_pins::Sealed for Pin<'B', 1, Alternate<3>> {}
+impl Ftm1Ch1Pin for Pin<'B', 1, Alternate<3>> {}
+
+/// Valid pin for FTM2 channel 0 (ALT3: PB18, mk20d7 only).
+#[cfg(feature = "mk20d7")]
+pub trait Ftm2Ch0Pin: sealed_pins::Sealed {}
+/// Valid pin for FTM2 channel 1 (ALT3: PB19, mk20d7 only).
+#[cfg(feature = "mk20d7")]
+pub trait Ftm2Ch1Pin: sealed_pins::Sealed {}
+
+#[cfg(feature = "mk20d7")]
+impl sealed_pins::Sealed for Pin<'B', 18, Alternate<3>> {}
+#[cfg(feature = "mk20d7")]
+impl Ftm2Ch0Pin for Pin<'B', 18, Alternate<3>> {}
+
+#[cfg(feature = "mk20d7")]
+impl sealed_pins::Sealed for Pin<'B', 19, Alternate<3>> {}
+#[cfg(feature = "mk20d7")]
+impl Ftm2Ch1Pin for Pin<'B', 19, Alternate<3>> {}
+
 // ----- Port pointer lookup -----
 
 const fn port_ptr(port: char) -> *const pac::porta::RegisterBlock {

@@ -1,7 +1,9 @@
 use core::marker::PhantomData;
 
 use crate::clocks::Clocks;
-use crate::gpio::{Alternate, Pin};
+use crate::gpio::{I2c0SclPin, I2c0SdaPin};
+#[cfg(feature = "mk20d7")]
+use crate::gpio::{I2c1SclPin, I2c1SdaPin};
 use crate::pac;
 use crate::time::Hertz;
 
@@ -25,6 +27,7 @@ impl Config {
 
 /// I2C communication error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Error {
     /// Arbitration was lost during communication.
     ArbitrationLoss,
@@ -48,8 +51,11 @@ impl embedded_hal::i2c::Error for Error {
 
 mod sealed {
     pub trait I2cInstance {
+        type Pac;
         fn ptr() -> *const crate::pac::i2c0::RegisterBlock;
         fn enable_clock(sim: &crate::pac::Sim);
+        /// Reconstruct the PAC peripheral (unsound if aliased).
+        unsafe fn steal_pac() -> Self::Pac;
     }
 }
 
@@ -57,11 +63,15 @@ mod sealed {
 pub struct I2c0;
 
 impl sealed::I2cInstance for I2c0 {
+    type Pac = pac::I2c0;
     fn ptr() -> *const pac::i2c0::RegisterBlock {
         pac::I2c0::PTR
     }
     fn enable_clock(sim: &pac::Sim) {
         sim.scgc4().modify(|_, w| w.i2c0()._1());
+    }
+    unsafe fn steal_pac() -> pac::I2c0 {
+        pac::I2c0::steal()
     }
 }
 
@@ -71,12 +81,16 @@ pub struct I2c1;
 
 #[cfg(feature = "mk20d7")]
 impl sealed::I2cInstance for I2c1 {
+    type Pac = pac::I2c1;
     fn ptr() -> *const pac::i2c0::RegisterBlock {
         // Safety: I2C1 and I2C0 have identical register layouts.
         pac::I2c1::PTR as *const pac::i2c0::RegisterBlock
     }
     fn enable_clock(sim: &pac::Sim) {
         sim.scgc4().modify(|_, w| w.i2c1()._1());
+    }
+    unsafe fn steal_pac() -> pac::I2c1 {
+        pac::I2c1::steal()
     }
 }
 
@@ -399,29 +413,50 @@ impl<I2C: sealed::I2cInstance> embedded_hal::i2c::I2c<SevenBitAddress> for I2c<I
     }
 }
 
+impl<I2C: sealed::I2cInstance> I2c<I2C> {
+    /// Release the I2C peripheral, returning the PAC type.
+    ///
+    /// Disables the I2C module before releasing.
+    /// Pins are not returned since they were consumed during construction.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure no other code holds a reference to this
+    /// peripheral's registers.
+    pub unsafe fn release(self) -> I2C::Pac {
+        let i2c = regs::<I2C>();
+        // Disable I2C
+        i2c.c1().write(|w| w.iicen()._0());
+        I2C::steal_pac()
+    }
+}
+
 // ----- Extension Trait -----
 
 /// Extension trait for creating I2C drivers from PAC I2C peripherals.
-pub trait I2cExt: Sized {
+///
+/// Pin types are constrained by marker traits (e.g., [`I2c0SclPin`]) to
+/// ensure only valid pin assignments compile.
+pub trait I2cExt<SCL, SDA>: Sized {
     type Instance: sealed::I2cInstance;
 
-    fn i2c<const SP: char, const SN: u8, const DP: char, const DN: u8>(
+    fn i2c(
         self,
-        _scl: Pin<SP, SN, Alternate<2>>,
-        _sda: Pin<DP, DN, Alternate<2>>,
+        _scl: SCL,
+        _sda: SDA,
         config: Config,
         clocks: &Clocks,
         sim: &pac::Sim,
     ) -> I2c<Self::Instance>;
 }
 
-impl I2cExt for pac::I2c0 {
+impl<SCL: I2c0SclPin, SDA: I2c0SdaPin> I2cExt<SCL, SDA> for pac::I2c0 {
     type Instance = I2c0;
 
-    fn i2c<const SP: char, const SN: u8, const DP: char, const DN: u8>(
+    fn i2c(
         self,
-        _scl: Pin<SP, SN, Alternate<2>>,
-        _sda: Pin<DP, DN, Alternate<2>>,
+        _scl: SCL,
+        _sda: SDA,
         config: Config,
         clocks: &Clocks,
         sim: &pac::Sim,
@@ -432,13 +467,13 @@ impl I2cExt for pac::I2c0 {
 }
 
 #[cfg(feature = "mk20d7")]
-impl I2cExt for pac::I2c1 {
+impl<SCL: I2c1SclPin, SDA: I2c1SdaPin> I2cExt<SCL, SDA> for pac::I2c1 {
     type Instance = I2c1;
 
-    fn i2c<const SP: char, const SN: u8, const DP: char, const DN: u8>(
+    fn i2c(
         self,
-        _scl: Pin<SP, SN, Alternate<2>>,
-        _sda: Pin<DP, DN, Alternate<2>>,
+        _scl: SCL,
+        _sda: SDA,
         config: Config,
         clocks: &Clocks,
         sim: &pac::Sim,

@@ -221,6 +221,7 @@ impl DmaSource {
 
 /// DMA transfer error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum DmaError {
     /// Source address not properly aligned for transfer size.
     SourceAddressError,
@@ -565,6 +566,59 @@ impl<const CH: u8> DmaChannel<CH> {
             source_last_adjust: -(count as i32 * ts_bytes as i32),
             dest_last_adjust: 0,
         });
+    }
+}
+
+// ----- DMA Transfer Handle -----
+
+/// A safe handle for an in-progress DMA transfer.
+///
+/// Ties the lifetime of the buffer to the transfer, preventing
+/// the buffer from being freed or modified while DMA is active.
+/// Dropping the handle aborts the transfer.
+pub struct DmaTransfer<'a, const CH: u8> {
+    pub(crate) channel: &'a mut DmaChannel<CH>,
+}
+
+impl<'a, const CH: u8> DmaTransfer<'a, CH> {
+    /// Check if the transfer has completed.
+    pub fn is_complete(&self) -> bool {
+        self.channel.is_complete()
+    }
+
+    /// Check if the transfer has errored.
+    pub fn has_error(&self) -> bool {
+        self.channel.has_error()
+    }
+
+    /// Block until the transfer completes or errors.
+    pub fn wait(self) -> Result<&'a mut DmaChannel<CH>, DmaError> {
+        loop {
+            if self.channel.has_error() {
+                let err = self.channel.error_status().unwrap_or(DmaError::Cancelled);
+                self.channel.clear_error();
+                self.channel.clear_done();
+                self.channel.disable_request();
+                core::mem::forget(self);
+                return Err(err);
+            }
+            if self.channel.is_complete() {
+                self.channel.clear_done();
+                self.channel.disable_request();
+                let ch_ptr = self.channel as *const DmaChannel<CH> as *mut DmaChannel<CH>;
+                core::mem::forget(self);
+                return Ok(unsafe { &mut *ch_ptr });
+            }
+        }
+    }
+}
+
+impl<'a, const CH: u8> Drop for DmaTransfer<'a, CH> {
+    fn drop(&mut self) {
+        // Abort the transfer on drop
+        self.channel.disable_request();
+        self.channel.clear_done();
+        self.channel.clear_error();
     }
 }
 

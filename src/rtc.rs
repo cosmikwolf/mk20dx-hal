@@ -26,6 +26,7 @@ use crate::pac;
 /// This occurs after initial power-on (before time has been set) or
 /// after a software reset of the RTC.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct TimeInvalid;
 
 /// Real-Time Clock driver.
@@ -178,5 +179,18 @@ impl Rtc {
     /// Disable the time counter (TCE=0).
     pub fn disable(&mut self) {
         Self::regs().sr().write(|w| w.tce()._0());
+    }
+
+    /// Release the RTC peripheral, returning the PAC type.
+    ///
+    /// The RTC counter continues running — this does not disable the clock
+    /// or oscillator, preserving timekeeping.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure no other code holds a reference to this
+    /// peripheral's registers.
+    pub unsafe fn release(self) -> pac::Rtc {
+        pac::Rtc::steal()
     }
 }

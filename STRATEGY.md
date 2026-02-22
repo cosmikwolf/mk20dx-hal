@@ -869,7 +869,230 @@ Uses the CMP internal 6-bit DAC as a self-referencing test source. By connecting
 | `test_write_completes` | `write()` 4 bytes | No hang |
 | `test_flush` | `flush()` after write | Completes |
 
-### 12.4 Tests Requiring Additional Hardware (Not Implemented)
+### 12.4 Async Tests (Interrupt-Driven)
+
+These tests validate the Phase 15 async support — interrupt handler wiring, `AtomicWaker` wakeup, and `embedded-hal-async` / `embedded-io-async` trait implementations. Each async test binary requires:
+
+1. **Interrupt handlers** — `#[interrupt]` functions that call the HAL's `on_*_interrupt()` exports
+2. **NVIC unmasking** — `cortex_m::peripheral::NVIC::unmask()` for each used interrupt
+3. **A minimal executor** — a `block_on()` helper that polls futures using SEV/WFE for efficient wakeup
+
+#### Executor Helper
+
+Since `defmt-test` runs synchronous `#[test]` functions, async tests use a minimal `block_on()` that bridges sync→async. The waker calls `cortex_m::asm::sev()` (Set Event) so that `wfe()` (Wait For Event) returns when an ISR calls `waker.wake()`.
+
+```rust
+fn block_on<T>(future: impl core::future::Future<Output = T>) -> T {
+    use core::pin::pin;
+    use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+    const VTABLE: RawWakerVTable = RawWakerVTable::new(
+        |_| RawWaker::new(core::ptr::null(), &VTABLE),
+        |_| cortex_m::asm::sev(),
+        |_| cortex_m::asm::sev(),
+        |_| {},
+    );
+
+    let waker = unsafe { Waker::from_raw(RawWaker::new(core::ptr::null(), &VTABLE)) };
+    let mut cx = Context::from_waker(&waker);
+    let mut future = pin!(future);
+
+    loop {
+        match future.as_mut().poll(&mut cx) {
+            Poll::Ready(val) => return val,
+            Poll::Pending => cortex_m::asm::wfe(),
+        }
+    }
+}
+```
+
+This works with `embassy-sync`'s `AtomicWaker` because: ISR fires → HAL handler calls `waker.wake()` → SEV unblocks WFE → `block_on` re-polls the future.
+
+#### Testsuite Dependencies
+
+```toml
+[dependencies]
+mk20dx-hal = { path = "../mk20dx-hal", features = ["mk20d7", "rt", "critical-section", "async"] }
+# ... existing deps ...
+```
+
+#### `tests/async_timer.rs` — 6 tests | Priority: HIGH | Wiring: None
+
+Validates async PIT delay via `embedded_hal_async::delay::DelayNs`.
+
+**Interrupt wiring:**
+```rust
+use mk20dx_hal::pac::interrupt;
+
+#[interrupt] fn PIT0() { mk20dx_hal::timer::on_pit0_interrupt(); }
+#[interrupt] fn PIT1() { mk20dx_hal::timer::on_pit1_interrupt(); }
+#[interrupt] fn PIT2() { mk20dx_hal::timer::on_pit2_interrupt(); }
+// PIT3 used as free-running reference timer (no ISR needed)
+```
+
+| Test | Description | Pass Criteria |
+|------|-------------|---------------|
+| `test_async_delay_1ms` | `block_on(ch0.delay_us(1000))` | Completes without hang |
+| `test_async_delay_100ms_accuracy` | ch3 free-run reference, `block_on(ch0.delay_us(100_000))`, read ch3 delta | Within ±2% of 3.6M ticks |
+| `test_async_delay_1us` | `block_on(ch0.delay_us(1))` | Completes |
+| `test_async_delay_ns_trait` | `block_on(DelayNs::delay_ns(&mut ch0, 5000))` | Completes |
+| `test_async_two_channels_sequential` | delay ch0 1ms, then delay ch1 1ms | Both complete |
+| `test_async_delay_repeated` | 10× sequential 1ms delays on ch0 | All 10 complete, ch3 delta within ±5% of 360k×10 ticks |
+
+**Key validation points:**
+- ISR clears TIF and disables TIE → Future sees TIE=0 as "ISR already fired" condition
+- AtomicWaker correctly bridges ISR → task wake → poll
+- PIT interrupt enable/disable lifecycle (TIE enabled during delay, disabled after)
+- Multiple channels don't interfere
+
+#### `tests/async_gpio_loopback.rs` — 5 tests | Priority: MEDIUM | Wiring: PTD5 → PTD6
+
+Validates `embedded_hal_async::digital::Wait` on input pins. Uses PIT one-shot timer to asynchronously toggle the output pin, so the edge/level change happens while the GPIO future is pending.
+
+**Interrupt wiring:**
+```rust
+use mk20dx_hal::pac::interrupt;
+
+#[interrupt] fn PORTD() { mk20dx_hal::gpio::on_portd_interrupt(); }
+#[interrupt] fn PIT0() { mk20dx_hal::timer::on_pit0_interrupt(); }
+```
+
+**Pattern for edge tests:** Configure PIT ch0 as a one-shot timer. In the PIT0 ISR (after calling the HAL handler), toggle the output pin. Then `block_on(input_pin.wait_for_*_edge())` — the PIT fires first, toggling the pin, which triggers the PORT ISR, which wakes the GPIO future.
+
+| Test | Description | Pass Criteria |
+|------|-------------|---------------|
+| `test_wait_for_high_already_high` | Set PTD5 high, `block_on(wait_for_high())` on PTD6 | Returns `Ok(())` immediately (first poll) |
+| `test_wait_for_low_already_low` | Set PTD5 low, `block_on(wait_for_low())` on PTD6 | Returns `Ok(())` immediately |
+| `test_wait_for_rising_edge` | PTD5 starts low. PIT one-shot 1ms → toggle high in ISR. `block_on(wait_for_rising_edge())` | Returns `Ok(())` after PIT fires |
+| `test_wait_for_falling_edge` | PTD5 starts high. PIT one-shot 1ms → toggle low in ISR. `block_on(wait_for_falling_edge())` | Returns `Ok(())` after PIT fires |
+| `test_wait_for_any_edge` | PTD5 starts low. PIT one-shot 1ms → toggle high in ISR. `block_on(wait_for_any_edge())` | Returns `Ok(())` after PIT fires |
+
+**Key validation points:**
+- PORT IRQC field correctly configured per wait type (0b1001=rising, 0b1010=falling, 0b1011=both)
+- Per-port `AtomicWaker` + per-pin `AtomicU32` pending flag mechanism
+- ISR reads ISFR, clears flags (w1c), ORs into PORT_PENDING atomics
+- Level waits (high/low) re-check PDIR; edge waits check/clear pending bit via `fetch_and`
+- PCR ISF w1c hazard handled (`.isf()._0()` on all PCR modify calls)
+- IRQC cleared after wait completes
+
+#### `tests/async_dma.rs` — 5 tests | Priority: MEDIUM | Wiring: None
+
+Validates async `DmaChannel::wait_complete()` with memory-to-memory transfers.
+
+**Interrupt wiring:**
+```rust
+use mk20dx_hal::pac::interrupt;
+
+#[interrupt] fn DMA_CH0() { mk20dx_hal::dma::on_dma0_interrupt(); }
+#[interrupt] fn DMA_CH1() { mk20dx_hal::dma::on_dma1_interrupt(); }
+```
+
+| Test | Description | Pass Criteria |
+|------|-------------|---------------|
+| `test_async_memcpy_4_bytes` | Configure memcpy, start, `block_on(wait_complete())` | dst == [1,2,3,4] |
+| `test_async_memcpy_256_bytes` | 256-byte patterned transfer | All bytes match |
+| `test_async_wait_complete_returns_ok` | Verify `wait_complete()` returns `Ok(())` | Result is Ok |
+| `test_async_two_channels` | ch0 + ch1 concurrent memcpy, `block_on` both sequentially | Both dst correct |
+| `test_async_error_on_bad_alignment` | 32-bit transfer with misaligned source, `block_on(wait_complete())` | Returns `Err(DmaError)` |
+
+**Key validation points:**
+- ISR clears CINT and wakes per-channel AtomicWaker
+- `wait_complete()` enables INTMAJOR, polls for DONE/ERROR
+- Interrupt disabled and DONE flag cleared after completion
+- Error path: ES register parsed into `DmaError` variants
+
+#### `tests/async_uart_loopback.rs` — 5 tests | Priority: MEDIUM | Wiring: PTD3 (TX) → PTD2 (RX)
+
+Validates `embedded_io_async::Read` and `embedded_io_async::Write` for UART via loopback.
+
+**Interrupt wiring:**
+```rust
+use mk20dx_hal::pac::interrupt;
+
+#[interrupt] fn UART2_RX_TX() { mk20dx_hal::uart::on_uart2_rx_tx_interrupt(); }
+```
+
+| Test | Description | Pass Criteria |
+|------|-------------|---------------|
+| `test_async_write_read_single_byte` | Async write 0xA5, async read 1 byte | Read == 0xA5 |
+| `test_async_write_read_multiple` | Async write [0x01..0x04], async read 4 bytes | All match in order |
+| `test_async_write_flush` | Async write + async flush | Completes without hang |
+| `test_async_split_tx_rx` | Split serial → Tx + Rx. Async write on Tx, async read on Rx | Byte matches |
+| `test_async_all_byte_values` | Write/read 0x00..0xFF one at a time | All 256 match |
+
+**Key validation points:**
+- ISR checks S1 flags: wakes RX waker on RDRF/errors, wakes TX waker on TDRE (disables TIE)
+- RIE (RX interrupt enable) enabled during read, disabled after
+- TIE (TX interrupt enable) enabled only when TDRE not ready, disabled by ISR
+- TCIE (TX complete interrupt enable) for flush
+- Split Tx/Rx types share the same underlying waker pair
+- Reuses existing `nb_read`/`nb_write`/`nb_flush` helpers internally
+
+#### `tests/async_spi_loopback.rs` — 7 tests | Priority: MEDIUM | Wiring: PTC6 (MOSI) → PTC7 (MISO)
+
+Validates `embedded_hal_async::spi::SpiBus<u8>` via MOSI→MISO loopback.
+
+**Interrupt wiring:**
+```rust
+use mk20dx_hal::pac::interrupt;
+
+#[interrupt] fn SPI0() { mk20dx_hal::spi::on_spi0_interrupt(); }
+```
+
+| Test | Description | Pass Criteria |
+|------|-------------|---------------|
+| `test_async_transfer_in_place` | 1 byte 0xA5 via async `transfer_in_place` | Read == 0xA5 |
+| `test_async_transfer_multiple` | 4 bytes in-place | All match |
+| `test_async_transfer_separate_bufs` | async `transfer(read, write)` | read == write |
+| `test_async_all_byte_values` | Transfer 0x00..0xFF | All match |
+| `test_async_read_sends_zeros` | async `read()` into buffer | All == 0x00 |
+| `test_async_write_completes` | async `write()` 4 bytes | No hang |
+| `test_async_flush` | async `flush()` after write | Completes |
+
+**Key validation points:**
+- ISR clears TCF in SR, disables TCF_RE in RSER, wakes per-instance AtomicWaker
+- `transfer_byte_async`: waits for TFFF (spin), pushes data, enables TCF_RE, awaits, reads POPR
+- RX overflow (RFOF) detection and error return
+- Per-byte async loop for multi-byte operations
+
+#### `tests/async_i2c.rs` — 4 tests | Priority: MEDIUM | Wiring: 4.7kΩ pull-ups on PTB0/PTB1
+
+Validates `embedded_hal_async::i2c::I2c<SevenBitAddress>` on empty bus.
+
+**Interrupt wiring:**
+```rust
+use mk20dx_hal::pac::interrupt;
+
+#[interrupt] fn I2C0() { mk20dx_hal::i2c::on_i2c0_interrupt(); }
+```
+
+| Test | Description | Pass Criteria |
+|------|-------------|---------------|
+| `test_async_write_nack_on_empty_bus` | Async write to addr 0x50 | `Err(AddressNack)` |
+| `test_async_read_nack_on_empty_bus` | Async read from addr 0x50 | `Err(AddressNack)` |
+| `test_async_bus_recovers_after_nack` | NACK, then retry | Second also NACKs (not hang) |
+| `test_async_scan_empty_bus` | Async probe addrs 0x08–0x77 | All 112 return NACK |
+
+**Key validation points:**
+- ISR disables IICIE (does NOT clear IICIF — driver reads S register for ARBL/RXAK first)
+- `wait_transfer_async()`: enables IICIE, polls for IICIF, checks ARBL
+- START/RSTART/STOP sequencing mirrors blocking transaction protocol
+- Bus idle check (BUSY spin-wait — not interrupt-driven)
+- Error recovery: MST cleared for STOP after NACK, bus returns to idle
+
+#### Async Test Summary
+
+| Binary | Tests | Wiring | Interrupts |
+|--------|-------|--------|------------|
+| `async_timer` | 6 | None | PIT0, PIT1, PIT2 |
+| `async_gpio_loopback` | 5 | PTD5 → PTD6 | PORTD, PIT0 |
+| `async_dma` | 5 | None | DMA_CH0, DMA_CH1 |
+| `async_uart_loopback` | 5 | PTD3 → PTD2 | UART2_RX_TX |
+| `async_spi_loopback` | 7 | PTC6 → PTC7 | SPI0 |
+| `async_i2c` | 4 | Pull-ups PTB0/PTB1 | I2C0 |
+| **Total** | **32** | | |
+
+### 12.5 Tests Requiring Additional Hardware (Not Implemented)
 
 These tests cannot be performed with the current test suite and would require additional equipment.
 
@@ -885,10 +1108,8 @@ These tests cannot be performed with the current test suite and would require ad
 | UART baud rate accuracy | Verify actual bit timing | Loopback proves data integrity, not timing | Logic analyzer |
 | DMA peripheral transfers | DMA with SPI/UART/ADC triggers | Memory-to-memory only without peripheral source | Configured peripheral + peripheral-specific wiring |
 | SPI with real device | Protocol correctness with slave | Loopback tests framing, not CS/protocol | SPI flash or EEPROM |
-| Interrupt-driven operation | Verify ISR execution | Tests are polling-only | Embassy async integration + interrupt tests |
-| Multi-core/multi-task | Concurrent peripheral access | Single-threaded tests only | RTOS or async executor |
 
-### 12.5 Running Tests
+### 12.6 Running Tests
 
 ```bash
 cd mk20dx-testsuite
@@ -910,6 +1131,16 @@ cargo test --test i2c
 cargo test --test gpio_loopback   # PTD5 → PTD6
 cargo test --test uart_loopback   # PTD3 → PTD2
 cargo test --test spi_loopback    # PTC6 → PTC7
+
+# Async self-tests (no wiring needed)
+cargo test --test async_timer
+cargo test --test async_dma
+
+# Async loopback tests (require wiring + pull-ups)
+cargo test --test async_gpio_loopback   # PTD5 → PTD6
+cargo test --test async_uart_loopback   # PTD3 → PTD2
+cargo test --test async_spi_loopback    # PTC6 → PTC7
+cargo test --test async_i2c             # Pull-ups PTB0/PTB1
 
 # Run all
 cargo test
@@ -997,9 +1228,9 @@ This avoids linker conflicts and gives users full control over interrupt priorit
 ### 15.2 Dependencies
 
 ```toml
-embassy-sync = { version = "0.6", optional = true }
+embassy-sync = { version = "0.7", optional = true }
 embedded-hal-async = { version = "1.0", optional = true }
-embedded-io-async = { version = "0.6", optional = true }
+embedded-io-async = { version = "0.7", optional = true }
 
 [features]
 async = ["dep:embassy-sync", "dep:embedded-hal-async", "dep:embedded-io-async"]
@@ -1038,6 +1269,471 @@ unsafe {
     cortex_m::peripheral::NVIC::unmask(pac::Interrupt::PORTA);
 }
 ```
+
+---
+
+## Phase 16: EEPROM / FlexMemory
+
+### 16.1 Hardware
+
+The MK20DX series includes **FlexMemory** — a hardware EEPROM emulation system with hardware-managed wear leveling. This is NOT software-emulated EEPROM; the flash controller handles all wear-leveling, page management, and journaling internally.
+
+Components:
+- **FlexNVM** (D-flash): 32 KB of data flash at `0x1000_0000`, used as EEPROM backup
+- **FlexRAM**: 2 KB at `0x1400_0000`, appears as byte-addressable EEPROM when configured in EEE mode
+- **FTFL controller**: Same controller as program flash — shared between `Flash` and `Eeprom` drivers
+
+### 16.2 How FlexMemory EEPROM Works
+
+1. **Partition once**: FTFL command `0x80` (Program Partition) splits FlexNVM into EEPROM backup vs. data flash, and sets FlexRAM mode. This is typically done once at factory provisioning.
+2. **Runtime**: FlexRAM at `0x1400_0000` is byte-readable instantly (memory-mapped) and byte-writable. Writes trigger the hardware EEE state machine which journals changes to FlexNVM backup.
+3. **After write**: Poll FCNFG.EEERDY to wait for the EEE state machine to complete the background flash write.
+4. **Power loss**: On next boot, the hardware automatically restores FlexRAM contents from the FlexNVM journal — no software involvement.
+
+### 16.3 FTFL Sharing Design
+
+Both `Flash` (program flash) and `Eeprom` (FlexMemory) use the same FTFL controller. Options:
+
+**Option A: Split ownership** — `FlashExt::flash(ftfl)` returns `(Flash, Eeprom)`. Both are zero-sized and share FTFL via raw pointer access (same as current `Flash`). The user must ensure they don't issue FTFL commands concurrently (enforced by `&mut self` on both).
+
+**Option B: Combined driver** — Single `FlashController` type that provides both flash and EEPROM APIs.
+
+**Recommended: Option A** — keeps existing `Flash` API unchanged and allows EEPROM to be used independently.
+
+### 16.4 API
+
+```rust
+pub trait FlashExt {
+    fn flash(self) -> (Flash, Eeprom);
+}
+
+pub struct Eeprom { _ftfl: () }
+
+impl Eeprom {
+    /// Read a byte from EEPROM (FlexRAM).
+    pub fn read(&self, offset: u16) -> u8;
+
+    /// Read a slice from EEPROM.
+    pub fn read_slice(&self, offset: u16, buf: &mut [u8]);
+
+    /// Write a byte to EEPROM. Waits for EEE state machine.
+    pub fn write(&mut self, offset: u16, value: u8) -> Result<(), EepromError>;
+
+    /// Write a slice to EEPROM.
+    pub fn write_slice(&mut self, offset: u16, data: &[u8]) -> Result<(), EepromError>;
+
+    /// Check if FlexRAM is configured for EEPROM mode.
+    pub fn is_eee_enabled(&self) -> bool;
+
+    /// Partition command (one-time factory provisioning).
+    pub fn partition(&mut self, eeprom_size: EepromSize, backup_size: BackupSize) -> Result<(), EepromError>;
+
+    /// EEPROM capacity in bytes.
+    pub fn capacity(&self) -> usize;
+}
+```
+
+### 16.5 Key Constraints
+
+- **Partition is permanent** until mass erase — partition command should require explicit confirmation (builder pattern or separate `unsafe` function)
+- **EEERDY polling** — writes must wait for FCNFG.EEERDY before returning
+- **FTFL mutual exclusion** — cannot issue flash commands while EEE state machine is active, and vice versa. Both `Flash` and `Eeprom` use `&mut self`, so the borrow checker prevents simultaneous access within a single task. Cross-task safety requires user discipline.
+- **FlexRAM mode** — FlexRAM defaults to traditional RAM mode after reset. Must check/set EEPROM mode via FCNFG.RAMRDY or Set FlexRAM command (0x81).
+- **Endurance** — Hardware provides ~10,000–100,000 write cycles per EEPROM location (depending on partition sizes), with automatic wear leveling across the FlexNVM backup area.
+
+### 16.6 Variant Differences
+
+| | MK20D5 (Teensy 3.0) | MK20D7 (Teensy 3.1/3.2) |
+|--|-----|------|
+| FlexNVM | 32 KB at 0x1000_0000 | 32 KB at 0x1000_0000 |
+| FlexRAM | 2 KB at 0x1400_0000 | 2 KB at 0x1400_0000 |
+| Max EEPROM | 2 KB | 2 KB |
+
+Both variants have identical FlexMemory — no `#[cfg]` needed.
+
+### 16.7 Validation
+
+| Test | Description | Pass Criteria |
+|------|-------------|---------------|
+| `test_eee_mode_check` | Check `is_eee_enabled()` | Returns true/false without crash |
+| `test_read_eeprom` | `read(0)` | Returns a byte, no fault |
+| `test_write_read_roundtrip` | `write(offset, 0xA5)` then `read(offset)` | Read == 0xA5 |
+| `test_write_slice_roundtrip` | Write 16 bytes, read back | All match |
+| `test_capacity` | `capacity()` | <= 2048 |
+
+**Note**: Partition tests should be in a separate opt-in binary (destructive, one-time operation).
+
+Reference: K20 ref manual chapter 29 (FTFL), chapter 30 (FlexMemory)
+
+---
+
+## Phase 17: Peripheral Improvements
+
+### 17.1 `defmt::Format` Feature
+
+Add an optional `defmt` feature flag that derives `defmt::Format` on all public error types and key structs, enabling structured logging of errors in `defmt`-based applications.
+
+```toml
+[dependencies]
+defmt = { version = "0.3", optional = true }
+
+[features]
+defmt = ["dep:defmt"]
+```
+
+Types to derive `defmt::Format` on:
+- `uart::Error` — already has `Debug`, add `#[cfg_attr(feature = "defmt", derive(defmt::Format))]`
+- `spi::Error`
+- `i2c::Error`
+- `dma::DmaError`
+- `flash::FlashError`
+- `adc::Resolution`, `adc::Averaging`
+- `clocks::Clocks` (manual impl — display frequencies)
+- `timer::PitChannel` status
+- `cmp::Hysteresis`, `cmp::Input`
+- `rtc::TimeInvalid`
+
+Pattern:
+```rust
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum Error { ... }
+```
+
+### 17.2 Pin Validation Traits
+
+Add marker traits that encode valid pin-peripheral mappings at compile time. Currently, any `Alternate<N>` pin can be passed to any peripheral constructor — incorrect MUX values compile but fail silently at runtime.
+
+```rust
+// Marker traits for SPI0 pins
+pub trait Spi0SckPin { const MUX: u8; }
+pub trait Spi0MosiPin { const MUX: u8; }
+pub trait Spi0MisoPin { const MUX: u8; }
+
+// Implementations for valid pins
+impl Spi0SckPin for Pin<'C', 5, Alternate<2>> { const MUX: u8 = 2; }
+impl Spi0SckPin for Pin<'D', 1, Alternate<2>> { const MUX: u8 = 2; }
+
+// Constructor enforces valid pin types
+impl SpiExt for pac::Spi0 {
+    fn spi<SCK: Spi0SckPin, MOSI: Spi0MosiPin, MISO: Spi0MisoPin>(
+        self, sck: SCK, mosi: MOSI, miso: MISO, ...
+    ) -> Spi<Spi0>;
+}
+```
+
+Peripherals to add pin validation:
+- SPI0, SPI1: SCK, MOSI, MISO, PCS0
+- UART0, UART1, UART2: TX, RX
+- I2C0, I2C1: SDA, SCL
+- FTM0 ch0-7, FTM1 ch0-1, FTM2 ch0-1: PWM output pins
+
+Source: K20 ref manual signal multiplexing table (chapter 10).
+
+### 17.3 `release()` Methods
+
+Add `release()` / `free()` methods to all peripheral drivers that return the consumed PAC peripheral, enabling reconfiguration or mode changes at runtime.
+
+```rust
+impl Serial<UART> {
+    pub fn release(self) -> (pac::Uart0, TxPin, RxPin) { ... }
+}
+
+impl Spi<SPI> {
+    pub fn release(self) -> (pac::Spi0, SckPin, MosiPin, MisoPin) { ... }
+}
+
+impl I2c<I2C> {
+    pub fn release(self) -> (pac::I2c0, SdaPin, SclPin) { ... }
+}
+```
+
+This requires storing the PAC peripheral in the driver struct (currently some drivers use zero-sized types with raw pointer access). Evaluate the trade-off: storing the PAC peripheral adds a word of storage but enables proper release.
+
+Drivers to add `release()`:
+- `Serial<UART>` → `(UartN, TxPin, RxPin)`
+- `Spi<SPI>` → `(SpiN, SckPin, MosiPin, MisoPin)`
+- `I2c<I2C>` → `(I2cN, SdaPin, SclPin)`
+- `Adc<ADC>` → `AdcN`
+- `Dac` → `Dac0`
+- `Rtc` → `pac::Rtc`
+- `Delay` → `SYST` (already implemented)
+- `PitChannels` → `pac::Pit` (would need all 4 channels returned)
+
+### 17.4 SpiDevice Helper
+
+Provide a convenience re-export or wrapper for `embedded-hal-bus` `ExclusiveDevice`, which combines `SpiBus` + CS `OutputPin` into an `SpiDevice`. This is the most common user need and currently requires them to find and import `embedded-hal-bus` themselves.
+
+```rust
+// Re-export from embedded-hal-bus (add as optional dependency)
+#[cfg(feature = "embedded-hal-bus")]
+pub use embedded_hal_bus::spi::ExclusiveDevice;
+```
+
+---
+
+## Phase 18: DMA-Backed Peripheral Transfers
+
+### 18.1 Overview
+
+Integrate DMA with SPI, UART, and ADC for high-throughput transfers without CPU involvement during data movement. The DMA channel handles reading from / writing to the peripheral data register, freeing the CPU.
+
+### 18.2 DMA + SPI
+
+```rust
+impl Spi<SPI0> {
+    /// Perform a DMA-backed SPI transfer.
+    /// Returns a `DmaTransfer` handle that can be polled or awaited.
+    pub fn transfer_dma<'a>(
+        &'a mut self,
+        tx_buf: &'a [u8],
+        rx_buf: &'a mut [u8],
+        tx_ch: &'a mut DmaChannel<TX_CH>,
+        rx_ch: &'a mut DmaChannel<RX_CH>,
+    ) -> DmaSpiTransfer<'a>;
+}
+```
+
+DMAMUX sources:
+- SPI0 RX: `DmaSource::SPI0_RX` (14)
+- SPI0 TX: `DmaSource::SPI0_TX` (15)
+- SPI1 RX/TX: mk20d7 only
+
+### 18.3 DMA + UART
+
+```rust
+impl Serial<UART0> {
+    pub fn write_dma<'a>(&'a mut self, buf: &'a [u8], ch: &'a mut DmaChannel<CH>) -> DmaUartWrite<'a>;
+    pub fn read_dma<'a>(&'a mut self, buf: &'a mut [u8], ch: &'a mut DmaChannel<CH>) -> DmaUartRead<'a>;
+}
+```
+
+DMAMUX sources:
+- UART0 RX: `DmaSource::UART0_RX` (2)
+- UART0 TX: `DmaSource::UART0_TX` (3)
+
+### 18.4 DMA + ADC
+
+```rust
+impl Adc<ADC0> {
+    /// Trigger ADC conversions via hardware trigger and collect results via DMA.
+    pub fn read_dma<'a>(
+        &'a mut self,
+        channels: &'a [u8],
+        results: &'a mut [u16],
+        ch: &'a mut DmaChannel<CH>,
+    ) -> DmaAdcRead<'a>;
+}
+```
+
+ADC can trigger DMA on conversion complete (SC2.DMAEN=1). DMAMUX source: `DmaSource::ADC0` (40).
+
+### 18.5 Transfer Lifetime Safety
+
+DMA transfers borrow the peripheral, buffers, and DMA channel for the transfer duration. The `DmaTransfer` handle ensures buffers live long enough and prevents aliased access. Dropping the handle aborts the transfer.
+
+### 18.6 Async Integration
+
+DMA transfers integrate naturally with the async DMA `wait_complete()`:
+
+```rust
+let transfer = spi.transfer_dma(tx, rx, &mut dma_ch0, &mut dma_ch1);
+transfer.start();
+dma_ch0.wait_complete().await?;
+dma_ch1.wait_complete().await?;
+```
+
+---
+
+## Phase 19: FTM Input Capture / Output Compare
+
+### 19.1 Overview
+
+The FlexTimer Module supports more than just PWM. Adding input capture and output compare extends FTM utility for timing measurements, pulse counting, and precise event generation.
+
+### 19.2 Input Capture
+
+Captures the FTM counter value on a pin edge (rising, falling, or both). Used for pulse width measurement, frequency measurement, and event timestamping.
+
+```rust
+pub struct InputCapture<FTM, const CH: u8> { ... }
+
+impl<FTM, const CH: u8> InputCapture<FTM, CH> {
+    /// Read the last captured value.
+    pub fn capture(&self) -> Option<u16>;
+
+    /// Wait for next capture event (blocking).
+    pub fn wait(&mut self) -> nb::Result<u16, Infallible>;
+
+    /// Enable capture interrupt.
+    pub fn enable_interrupt(&mut self);
+}
+```
+
+Channel mode: CnSC MSB:MSA=00, ELSB:ELSA selects edge (01=rising, 10=falling, 11=both).
+
+### 19.3 Output Compare
+
+Toggles/sets/clears a pin when the FTM counter matches the channel value. Used for precise timing events.
+
+```rust
+pub struct OutputCompare<FTM, const CH: u8> { ... }
+
+impl<FTM, const CH: u8> OutputCompare<FTM, CH> {
+    pub fn set_compare(&mut self, value: u16);
+    pub fn set_action(&mut self, action: CompareAction); // Toggle, Set, Clear
+}
+```
+
+### 19.4 Quadrature Decoder
+
+FTM1 and FTM2 support quadrature decoder mode (QDCTRL register). Used for rotary encoders.
+
+```rust
+pub struct QuadratureDecoder<FTM> { ... }
+
+impl QuadratureDecoder<FTM1> {
+    pub fn new(ftm: pac::Ftm1, pha: PhAPin, phb: PhBPin, sim: &pac::Sim) -> Self;
+    pub fn count(&self) -> u16;
+    pub fn direction(&self) -> Direction;
+}
+```
+
+### 19.5 Validation
+
+| Test | Description | Pass Criteria |
+|------|-------------|---------------|
+| `test_output_compare_toggle` | OC on pin, use PIT to measure period | Toggle occurs |
+| `test_input_capture_loopback` | FTM output → FTM input capture | Captured value reasonable |
+| `test_quad_decoder_manual` | Read counter, manually pulse pins | Counter increments |
+
+Reference: K20 ref manual chapter 36 (FTM)
+
+---
+
+## Phase 20: Low-Power Modes
+
+### 20.1 Overview
+
+The MK20 supports multiple low-power modes for battery-operated or power-sensitive applications. Each mode trades off wake-up latency vs. power savings.
+
+### 20.2 Power Modes
+
+| Mode | Core | Bus | Flash | Peripherals | Wake Sources |
+|------|------|-----|-------|-------------|-------------|
+| Run | Active | Active | Active | Active | — |
+| Wait | WFI | Active | Active | Active | Any interrupt |
+| VLPR | 4 MHz max | 1 MHz max | 1 MHz max | Limited | — |
+| VLPW | WFI (4 MHz) | 1 MHz max | 1 MHz max | Limited | Any interrupt |
+| VLPS | Off | Off | Off | Some | LLWU, GPIO, LPTMR |
+| LLS | Off | Off | Off | Off | LLWU only |
+| VLLSx | Off | Off | Off | Off | LLWU, reset |
+
+### 20.3 MCG Mode Transitions
+
+Low-power modes require MCG clock mode changes:
+- **Run → VLPR**: MCG must be in BLPI (Bypassed Low-Power Internal) mode, 4 MHz max
+- **VLPR → Run**: Transition back through BLPE → PBE → PEE
+- **VLPS/LLS**: Enter from Run or VLPR via SMC registers
+
+```rust
+pub struct PowerControl { _smc: () }
+
+impl PowerControl {
+    pub fn new(smc: pac::Smc) -> Self;
+
+    /// Enter Wait mode (WFI — wakes on any interrupt).
+    pub fn wait(&self);
+
+    /// Enter VLPR mode (low-power run, 4 MHz max).
+    /// Requires MCG reconfiguration to BLPI mode.
+    pub fn enter_vlpr(&mut self, mcg: &mut Mcg) -> Result<(), PowerError>;
+
+    /// Exit VLPR mode back to normal Run.
+    pub fn exit_vlpr(&mut self, mcg: &mut Mcg) -> Result<(), PowerError>;
+
+    /// Enter VLPS mode (very low-power stop).
+    /// CPU halts; wakes on LLWU, GPIO, or LPTMR.
+    pub fn enter_vlps(&mut self);
+
+    /// Enter LLS mode (low-leakage stop).
+    /// CPU halts; wakes only on LLWU sources.
+    pub fn enter_lls(&mut self);
+}
+```
+
+### 20.4 LLWU (Low-Leakage Wake-Up Unit)
+
+The LLWU provides wake-up sources for deep sleep modes (LLS, VLLSx):
+
+```rust
+pub struct Llwu { ... }
+
+impl Llwu {
+    pub fn new(llwu: pac::Llwu) -> Self;
+    pub fn enable_pin_wakeup(&mut self, pin: LlwuPin, edge: WakeEdge);
+    pub fn enable_module_wakeup(&mut self, module: LlwuModule);
+    pub fn wakeup_flags(&self) -> u32;
+    pub fn clear_flags(&mut self);
+}
+```
+
+### 20.5 Dependencies
+
+- LPTMR (Low-Power Timer) may be needed as a wake source — consider adding an LPTMR driver in this phase or as a separate sub-phase
+- MCG BLPI/BLPE mode transitions need to be added to the clocks module
+
+### 20.6 Validation
+
+Low-power mode testing is challenging without current measurement equipment. Register-level validation and wake-up source testing are possible:
+
+| Test | Description | Pass Criteria |
+|------|-------------|---------------|
+| `test_wait_wakes_on_pit` | Enter wait, PIT fires, wake | Resumes after PIT |
+| `test_vlpr_entry_exit` | Enter VLPR, check MCG, exit | MCG returns to PEE |
+| `test_llwu_flag_set` | Configure LLWU, trigger, check | Flag set correctly |
+
+Reference: K20 ref manual chapters 6 (Power Management), 7 (LLWU), 15 (SMC)
+
+---
+
+## Phase 21: Additional Peripherals
+
+### 21.1 LPTMR (Low-Power Timer)
+
+A 16-bit timer/counter that operates in all power modes including VLPS and LLS. Can use the 1 kHz LPO clock, 32.768 kHz RTC oscillator, or external pin as clock source.
+
+Use cases: periodic wake from low-power modes, pulse counting, long-period timing (seconds to minutes).
+
+```rust
+pub struct Lptmr { ... }
+
+impl Lptmr {
+    pub fn new(lptmr: pac::Lptmr0, sim: &pac::Sim) -> Self;
+    pub fn start(&mut self, period_ms: u32);
+    pub fn wait(&mut self) -> nb::Result<(), Infallible>;
+    pub fn enable_interrupt(&mut self);
+}
+```
+
+Reference: K20 ref manual chapter 27 (LPTMR)
+
+### 21.2 CRC Module
+
+Hardware CRC computation with configurable polynomial (CRC-16, CRC-32).
+
+```rust
+pub struct Crc { ... }
+
+impl Crc {
+    pub fn new(crc: pac::Crc, config: CrcConfig) -> Self;
+    pub fn feed(&mut self, data: &[u8]);
+    pub fn result(&self) -> u32;
+    pub fn reset(&mut self);
+}
+```
+
+Reference: K20 ref manual chapter 26 (CRC)
 
 ---
 

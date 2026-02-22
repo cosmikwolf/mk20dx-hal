@@ -1,7 +1,9 @@
 use core::marker::PhantomData;
 
 use crate::clocks::Clocks;
-use crate::gpio::{Alternate, Pin};
+use crate::gpio::{Spi0SckPin, Spi0MosiPin, Spi0MisoPin};
+#[cfg(feature = "mk20d7")]
+use crate::gpio::{Spi1SckPin, Spi1MosiPin, Spi1MisoPin};
 use crate::pac;
 use crate::time::Hertz;
 
@@ -38,6 +40,7 @@ impl Config {
 
 /// SPI communication error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Error {
     Overrun,
 }
@@ -110,21 +113,17 @@ fn calc_baud(bus_clk: u32, target: u32) -> (u8, u8, bool) {
 // ----- Extension Trait -----
 
 /// Extension trait for creating SPI drivers from PAC SPI peripherals.
-pub trait SpiExt: Sized {
+///
+/// Pin types are constrained by marker traits (e.g., [`Spi0SckPin`]) to
+/// ensure only valid pin assignments compile.
+pub trait SpiExt<SCK, MOSI, MISO>: Sized {
     type Instance: sealed::SpiInstance;
 
-    fn spi<
-        const SP: char,
-        const SN: u8,
-        const OP: char,
-        const ON: u8,
-        const IP: char,
-        const IN: u8,
-    >(
+    fn spi(
         self,
-        _sck: Pin<SP, SN, Alternate<2>>,
-        _mosi: Pin<OP, ON, Alternate<2>>,
-        _miso: Pin<IP, IN, Alternate<2>>,
+        _sck: SCK,
+        _mosi: MOSI,
+        _miso: MISO,
         config: Config,
         clocks: &Clocks,
         sim: &pac::Sim,
@@ -134,7 +133,9 @@ pub trait SpiExt: Sized {
 // ----- Per-instance macro -----
 
 macro_rules! spi_impl {
-    ($PacType:ty, $Instance:ty, $ctar_fn:ident, $pushr_fn:ident, $scgc_field:ident) => {
+    ($PacType:ty, $Instance:ty, $ctar_fn:ident, $pushr_fn:ident, $scgc_field:ident,
+     $SckPin:path, $MosiPin:path, $MisoPin:path,
+     $tx_source:expr, $rx_source:expr) => {
         impl Spi<$Instance> {
             fn regs() -> &'static <$PacType as core::ops::Deref>::Target {
                 unsafe { &*<$PacType>::PTR }
@@ -232,6 +233,80 @@ macro_rules! spi_impl {
                 // Pop received byte
                 Ok(spi.popr().read().rxdata().bits() as u8)
             }
+
+            /// Return the TX (PUSHR) register address for DMA configuration.
+            ///
+            /// Use with [`DmaChannel::configure_peripheral_write`] and
+            /// the appropriate `DmaSource` (e.g., `DmaSource::SPI0_TX`).
+            pub fn tx_dma_addr() -> u32 {
+                <$PacType>::PTR as u32 + 0x34 // PUSHR offset
+            }
+
+            /// Return the RX (POPR) register address for DMA configuration.
+            ///
+            /// Use with [`DmaChannel::configure_peripheral_read`] and
+            /// the appropriate `DmaSource` (e.g., `DmaSource::SPI0_RX`).
+            pub fn rx_dma_addr() -> u32 {
+                <$PacType>::PTR as u32 + 0x38 // POPR offset
+            }
+
+            /// Start a DMA-backed write transfer.
+            ///
+            /// Configures the DMA channel to write `buf.len()` bytes from `buf`
+            /// to the SPI TX register, then enables hardware DMA requests.
+            /// The SPI TFFF_RE bit is set to trigger DMA when the TX FIFO has space.
+            ///
+            /// Returns a [`DmaTransfer`] handle. The transfer runs in the background;
+            /// call [`DmaTransfer::wait`] to block until complete.
+            ///
+            /// # Safety
+            ///
+            /// The caller must ensure `buf` remains valid for the duration of the
+            /// transfer (enforced by the lifetime on `DmaTransfer`).
+            pub fn write_dma<'a, const CH: u8>(
+                &'a mut self,
+                buf: &'a [u8],
+                ch: &'a mut crate::dma::DmaChannel<CH>,
+            ) -> crate::dma::DmaTransfer<'a, CH> {
+                let spi = Self::regs();
+
+                // Configure DMA channel: memory → SPI PUSHR
+                unsafe {
+                    ch.configure_peripheral_write(
+                        buf.as_ptr(),
+                        Self::tx_dma_addr(),
+                        crate::dma::TransferSize::Bits8,
+                        buf.len() as u16,
+                    );
+                }
+
+                // Set DMAMUX source for SPI TX
+                ch.set_source($tx_source);
+
+                // Enable SPI DMA TX request (RSER.TFFF_RE)
+                spi.rser().modify(|_, w| w.tfff_re()._1().tfff_dirs()._1());
+
+                // Enable DMA requests
+                ch.enable_request();
+
+                crate::dma::DmaTransfer { channel: ch }
+            }
+
+            /// Release the SPI peripheral, returning the PAC type.
+            ///
+            /// Halts transfers and disables the module before releasing.
+            /// Pins are not returned since they were consumed during construction.
+            ///
+            /// # Safety
+            ///
+            /// The caller must ensure no other code holds a reference to this
+            /// peripheral's registers.
+            pub unsafe fn release(self) -> $PacType {
+                let spi = Self::regs();
+                // Halt transfers and disable module
+                spi.mcr().modify(|_, w| w.halt()._1().mdis()._1());
+                <$PacType>::steal()
+            }
         }
 
         impl embedded_hal::spi::ErrorType for Spi<$Instance> {
@@ -279,21 +354,14 @@ macro_rules! spi_impl {
             }
         }
 
-        impl SpiExt for $PacType {
+        impl<SCK: $SckPin, MOSI: $MosiPin, MISO: $MisoPin> SpiExt<SCK, MOSI, MISO> for $PacType {
             type Instance = $Instance;
 
-            fn spi<
-                const SP: char,
-                const SN: u8,
-                const OP: char,
-                const ON: u8,
-                const IP: char,
-                const IN: u8,
-            >(
+            fn spi(
                 self,
-                _sck: Pin<SP, SN, Alternate<2>>,
-                _mosi: Pin<OP, ON, Alternate<2>>,
-                _miso: Pin<IP, IN, Alternate<2>>,
+                _sck: SCK,
+                _mosi: MOSI,
+                _miso: MISO,
                 config: Config,
                 clocks: &Clocks,
                 sim: &pac::Sim,
@@ -306,11 +374,15 @@ macro_rules! spi_impl {
 }
 
 // Both variants have SPI0
-spi_impl!(pac::Spi0, Spi0, spi0_ctar, spi0_pushr, spi0);
+spi_impl!(pac::Spi0, Spi0, spi0_ctar, spi0_pushr, spi0,
+          Spi0SckPin, Spi0MosiPin, Spi0MisoPin,
+          crate::dma::DmaSource::SPI0_TX, crate::dma::DmaSource::SPI0_RX);
 
 // Only mk20d7 has SPI1
 #[cfg(feature = "mk20d7")]
-spi_impl!(pac::Spi1, Spi1, spi1_ctar, spi1_pushr, spi1);
+spi_impl!(pac::Spi1, Spi1, spi1_ctar, spi1_pushr, spi1,
+          Spi1SckPin, Spi1MosiPin, Spi1MisoPin,
+          crate::dma::DmaSource::SPI1_TX, crate::dma::DmaSource::SPI1_RX);
 
 // ----- Async support -----
 

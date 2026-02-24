@@ -179,6 +179,7 @@ impl sealed::UartInstance for Uart2 {
 }
 
 fn regs<UART: sealed::UartInstance>() -> &'static pac::uart0::RegisterBlock {
+    // SAFETY: UartInstance::ptr() returns a valid register block pointer.
     unsafe { &*UART::ptr() }
 }
 
@@ -204,7 +205,7 @@ pub struct Rx<UART> {
 /// Calculate SBR and BRFA for the target baud rate.
 ///
 /// `baud = module_clk / (16 * (SBR + BRFA/32))`
-fn calc_baud(module_clk: u32, baudrate: u32) -> (u16, u8) {
+pub fn calc_baud(module_clk: u32, baudrate: u32) -> (u16, u8) {
     // sbr32 = module_clk * 2 / baudrate (with rounding)
     let sbr32 = ((2 * module_clk as u64 + baudrate as u64 / 2) / baudrate as u64) as u32;
     let sbr = (sbr32 / 32).clamp(1, 0x1FFF) as u16;
@@ -220,9 +221,11 @@ impl<UART: sealed::UartInstance> Serial<UART> {
         let (sbr, brfa) = calc_baud(module_clk, config.baudrate.raw());
 
         // Disable TX and RX during configuration
+        // SAFETY: Writing 0 disables all C2 features (TX, RX, interrupts).
         uart.c2().write(|w| unsafe { w.bits(0) });
 
         // Baud rate fine adjust
+        // SAFETY: brfa is a 5-bit field; calc_baud returns a value mod 32.
         uart.c4().write(|w| unsafe { w.brfa().bits(brfa) });
 
         // Word length and parity
@@ -240,6 +243,8 @@ impl<UART: sealed::UartInstance> Serial<UART> {
         });
 
         // Baud rate divisor (BDL write latches the pair)
+        // SAFETY: sbr is clamped to 0x1FFF by calc_baud. BDH.SBR is 5-bit
+        // (high bits), BDL.SBR is 8-bit (low bits).
         uart.bdh().write(|w| unsafe { w.sbr().bits((sbr >> 8) as u8) });
         uart.bdl().write(|w| unsafe { w.sbr().bits(sbr as u8) });
 
@@ -250,6 +255,7 @@ impl<UART: sealed::UartInstance> Serial<UART> {
         uart.cfifo().write(|w| w.txflush()._1().rxflush()._1());
 
         // TX watermark = 0, RX watermark = 1
+        // SAFETY: TWFIFO/RWFIFO are 8-bit registers accepting any u8 value.
         uart.twfifo().write(|w| unsafe { w.bits(0) });
         uart.rwfifo().write(|w| unsafe { w.bits(1) });
 
@@ -395,6 +401,7 @@ fn nb_write<UART: sealed::UartInstance>(byte: u8) -> nb::Result<(), Error> {
     if uart.s1().read().tdre().is_0() {
         return Err(nb::Error::WouldBlock);
     }
+    // SAFETY: D is an 8-bit data register; byte is u8.
     uart.d().write(|w| unsafe { w.bits(byte) });
     Ok(())
 }
@@ -599,6 +606,10 @@ uart_ext_impl!(pac::Uart2, Uart2, Uart2TxPin, Uart2RxPin, bus_clk);
 
 #[cfg(feature = "async")]
 mod async_impl {
+    //! Async support assumes a single-executor, single-core environment.
+    //! Each UART instance has separate TX and RX wakers — one task may
+    //! read and one task may write concurrently on the same UART.
+
     use super::*;
     use embassy_sync::waitqueue::AtomicWaker;
 

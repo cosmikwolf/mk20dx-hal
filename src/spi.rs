@@ -78,15 +78,17 @@ pub struct Spi<SPI> {
 
 // ----- Baud Rate Calculation -----
 
-const BR_SCALERS: [u16; 16] = [
+/// DSPI baud rate scaler values (BR field, K20 ref manual Table 48-42).
+pub const BR_SCALERS: [u16; 16] = [
     2, 4, 6, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768,
 ];
-const PBR_PRESCALERS: [u16; 4] = [2, 3, 5, 7];
+/// DSPI baud rate prescaler values (PBR field, K20 ref manual Table 48-42).
+pub const PBR_PRESCALERS: [u16; 4] = [2, 3, 5, 7];
 
 /// Calculate BR scaler index, PBR prescaler index, and DBR flag for target baud rate.
 ///
 /// Returns the combination that produces the closest baud rate not exceeding the target.
-fn calc_baud(bus_clk: u32, target: u32) -> (u8, u8, bool) {
+pub fn calc_baud(bus_clk: u32, target: u32) -> (u8, u8, bool) {
     let mut best_br: u8 = 0;
     let mut best_pbr: u8 = 0;
     let mut best_dbr = false;
@@ -138,6 +140,7 @@ macro_rules! spi_impl {
      $tx_source:expr, $rx_source:expr) => {
         impl Spi<$Instance> {
             fn regs() -> &'static <$PacType as core::ops::Deref>::Target {
+                // SAFETY: PTR is a valid pointer to the SPI register block.
                 unsafe { &*<$PacType>::PTR }
             }
 
@@ -187,6 +190,8 @@ macro_rules! spi_impl {
                               .pcssck()._00()
                               .pasc()._00()
                               .pdt()._00();
+                    // SAFETY: fmsz is 4-bit (7 fits), br is 4-bit (from calc_baud),
+                    // cssck/asc/dt are 4-bit fields; 0 fits all.
                     unsafe {
                         w.fmsz().bits(7) // 8-bit frame (N-1)
                          .br().bits(br)
@@ -202,15 +207,18 @@ macro_rules! spi_impl {
                 Spi { _spi: PhantomData }
             }
 
+            /// Transfer a single byte (blocking). Assumes the SPI hardware is
+            /// functioning correctly — busy-waits with no timeout.
             fn transfer_byte(byte: u8) -> Result<u8, Error> {
                 let spi = Self::regs();
 
-                // Wait for TX FIFO space
+                // Wait for TX FIFO space (no timeout — assumes responsive hardware)
                 while spi.sr().read().tfff().is_0() {}
                 // Clear TFFF (w1c)
                 spi.sr().write(|w| w.tfff()._1());
 
                 // Push data with PCS0 asserted, CTAR0
+                // SAFETY: txdata is a 16-bit field; u8 as u16 fits.
                 spi.$pushr_fn().write(|w| unsafe {
                     w.txdata().bits(byte as u16)
                      .pcs()._1()
@@ -227,11 +235,13 @@ macro_rules! spi_impl {
                     return Err(Error::Overrun);
                 }
 
-                // Clear RFDF (w1c)
+                // Pop received byte, then clear RFDF.
+                // Order matters: clearing RFDF before reading POPR causes
+                // the flag to re-assert immediately (FIFO still non-empty),
+                // making the next call see a stale RFDF and skip the wait.
+                let data = spi.popr().read().rxdata().bits() as u8;
                 spi.sr().write(|w| w.rfdf()._1());
-
-                // Pop received byte
-                Ok(spi.popr().read().rxdata().bits() as u8)
+                Ok(data)
             }
 
             /// Return the TX (PUSHR) register address for DMA configuration.
@@ -349,6 +359,7 @@ macro_rules! spi_impl {
 
             fn flush(&mut self) -> Result<(), Self::Error> {
                 let spi = Spi::<$Instance>::regs();
+                // Busy-wait for TX FIFO to drain (no timeout).
                 while spi.sr().read().txctr().bits() != 0 {}
                 Ok(())
             }
@@ -388,6 +399,10 @@ spi_impl!(pac::Spi1, Spi1, spi1_ctar, spi1_pushr, spi1,
 
 #[cfg(feature = "async")]
 mod async_impl {
+    //! Async support assumes a single-executor, single-core environment.
+    //! Each SPI instance has one waker — only one task may use a given
+    //! SPI instance at a time.
+
     use super::*;
     use embassy_sync::waitqueue::AtomicWaker;
 
@@ -411,12 +426,14 @@ mod async_impl {
 
     /// Call from the `SPI0` interrupt handler.
     pub fn on_spi0_interrupt() {
+        // SAFETY: PTR is a valid pointer to the SPI0 register block.
         on_spi_interrupt(unsafe { &*pac::Spi0::PTR }, &SPI0_WAKER);
     }
 
     /// Call from the `SPI1` interrupt handler (mk20d7 only).
     #[cfg(feature = "mk20d7")]
     pub fn on_spi1_interrupt() {
+        // SAFETY: SPI1 has identical register layout to SPI0; the cast is valid.
         on_spi_interrupt(
             unsafe { &*(pac::Spi1::PTR as *const pac::spi0::RegisterBlock) },
             &SPI1_WAKER,
@@ -434,6 +451,7 @@ mod async_impl {
                     spi.sr().write(|w| w.tfff()._1());
 
                     // Push data with PCS0 asserted, CTAR0
+                    // SAFETY: txdata is a 16-bit field; u8 as u16 fits.
                     spi.$pushr_fn().write(|w| unsafe {
                         w.txdata().bits(byte as u16).pcs()._1()
                     });

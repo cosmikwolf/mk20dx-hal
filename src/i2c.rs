@@ -83,7 +83,8 @@ pub struct I2c1;
 impl sealed::I2cInstance for I2c1 {
     type Pac = pac::I2c1;
     fn ptr() -> *const pac::i2c0::RegisterBlock {
-        // Safety: I2C1 and I2C0 have identical register layouts.
+        // SAFETY: I2C1 and I2C0 have identical register layouts. The HAL
+        // only accesses registers defined in the i2c0 RegisterBlock.
         pac::I2c1::PTR as *const pac::i2c0::RegisterBlock
     }
     fn enable_clock(sim: &pac::Sim) {
@@ -95,6 +96,7 @@ impl sealed::I2cInstance for I2c1 {
 }
 
 fn regs<I2C: sealed::I2cInstance>() -> &'static pac::i2c0::RegisterBlock {
+    // SAFETY: I2cInstance::ptr() returns a valid register block pointer.
     unsafe { &*I2C::ptr() }
 }
 
@@ -107,9 +109,9 @@ pub struct I2c<I2C> {
 
 // ----- Baud Rate Calculation -----
 
-/// ICR divider table from K20 reference manual (Table 46-41).
+/// ICR divider table (K20 ref manual Table 46-41 / K20P64M72SF1RM).
 /// Index = ICR field value (0-63), value = SCL clock divider.
-const ICR_DIVIDERS: [u16; 64] = [
+pub const ICR_DIVIDERS: [u16; 64] = [
     20, 22, 24, 26, 28, 30, 34, 40,
     28, 32, 36, 40, 44, 48, 56, 68,
     48, 56, 64, 72, 80, 88, 104, 128,
@@ -120,12 +122,12 @@ const ICR_DIVIDERS: [u16; 64] = [
     1280, 1536, 1792, 2048, 2304, 2560, 3072, 3840,
 ];
 
-const MULT_VALUES: [u16; 3] = [1, 2, 4];
+pub const MULT_VALUES: [u16; 3] = [1, 2, 4];
 
 /// Select ICR and MULT for the closest SCL frequency not exceeding `target`.
 ///
 /// `SCL_freq = bus_clk / (MULT × ICR_divider[ICR])`
-fn calc_frequency(bus_clk: u32, target: u32) -> (u8, u8) {
+pub fn calc_frequency(bus_clk: u32, target: u32) -> (u8, u8) {
     let mut best_icr: u8 = 0;
     let mut best_mult: u8 = 0;
     let mut best_freq: u32 = 0;
@@ -156,6 +158,7 @@ impl<I2C: sealed::I2cInstance> I2c<I2C> {
 
         // Set frequency divider
         i2c.f().write(|w| {
+            // SAFETY: icr is a 6-bit field (0-63); calc_frequency returns valid indices.
             let w = unsafe { w.icr().bits(icr) };
             match mult {
                 0 => w.mult()._00(),
@@ -178,6 +181,9 @@ impl<I2C: sealed::I2cInstance> I2c<I2C> {
 
 impl<I2C: sealed::I2cInstance> I2c<I2C> {
     /// Poll for transfer complete and check for arbitration loss.
+    ///
+    /// Busy-waits with no timeout — assumes the I2C hardware completes
+    /// each byte transfer. Use the async variant for non-blocking operation.
     fn wait_transfer(&self) -> Result<(), Error> {
         let i2c = regs::<I2C>();
         loop {
@@ -197,7 +203,7 @@ impl<I2C: sealed::I2cInstance> I2c<I2C> {
     fn start(&self, addr: u8, read: bool) -> Result<(), Error> {
         let i2c = regs::<I2C>();
 
-        // Wait for bus idle
+        // Wait for bus idle (no timeout — bus should be free after STOP).
         while i2c.s().read().busy().is_1() {}
 
         // MST 0→1 generates START; set TX for address byte
@@ -205,6 +211,8 @@ impl<I2C: sealed::I2cInstance> I2c<I2C> {
 
         // Send address byte (7-bit address + R/W bit)
         let addr_byte = (addr << 1) | if read { 1 } else { 0 };
+        // SAFETY: data is an 8-bit field; addr_byte is u8. This same rationale
+        // applies to all I2C data register writes in this module.
         i2c.d().write(|w| unsafe { w.data().bits(addr_byte) });
 
         self.wait_transfer()?;
@@ -487,6 +495,10 @@ impl<SCL: I2c1SclPin, SDA: I2c1SdaPin> I2cExt<SCL, SDA> for pac::I2c1 {
 
 #[cfg(feature = "async")]
 mod async_impl {
+    //! Async support assumes a single-executor, single-core environment.
+    //! Each I2C instance has one waker — only one task may use a given
+    //! I2C instance at a time.
+
     use super::*;
     use embassy_sync::waitqueue::AtomicWaker;
 
@@ -504,7 +516,7 @@ mod async_impl {
             }
             #[cfg(not(feature = "mk20d7"))]
             {
-                &I2C0_WAKER
+                unreachable!("unknown I2C peripheral address")
             }
         }
     }
@@ -523,12 +535,14 @@ mod async_impl {
 
     /// Call from the `I2C0` interrupt handler.
     pub fn on_i2c0_interrupt() {
+        // SAFETY: PTR is a valid pointer to the I2C0 register block.
         on_i2c_interrupt(unsafe { &*pac::I2c0::PTR }, &I2C0_WAKER);
     }
 
     /// Call from the `I2C1` interrupt handler (mk20d7 only).
     #[cfg(feature = "mk20d7")]
     pub fn on_i2c1_interrupt() {
+        // SAFETY: I2C1 has identical register layout to I2C0; the cast is valid.
         on_i2c_interrupt(
             unsafe { &*(pac::I2c1::PTR as *const pac::i2c0::RegisterBlock) },
             &I2C1_WAKER,

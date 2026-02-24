@@ -36,11 +36,14 @@ const NUM_CHANNELS: usize = 16;
 
 /// Access the DMA register block.
 fn dma_regs() -> &'static pac::dma::RegisterBlock {
+    // SAFETY: PTR is a valid pointer to the DMA register block,
+    // which is memory-mapped I/O that exists for the program's lifetime.
     unsafe { &*pac::Dma::PTR }
 }
 
 /// Access the DMAMUX register block.
 fn dmamux_regs() -> &'static pac::dmamux::RegisterBlock {
+    // SAFETY: PTR is a valid pointer to the DMAMUX register block.
     unsafe { &*pac::Dmamux::PTR }
 }
 
@@ -48,7 +51,7 @@ fn dmamux_regs() -> &'static pac::dmamux::RegisterBlock {
 ///
 /// DCHPRI registers are byte-swapped within 32-bit groups:
 /// ch0→idx3, ch1→idx2, ch2→idx1, ch3→idx0, ch4→idx7, etc.
-const fn dchpri_index(ch: u8) -> usize {
+pub const fn dchpri_index(ch: u8) -> usize {
     (ch ^ 3) as usize
 }
 
@@ -217,6 +220,117 @@ impl DmaSource {
     pub const ALWAYS_ON9: Self = Self(63);
 }
 
+// ----- Channel Linking -----
+
+/// DMA channel linking mode.
+///
+/// Channel linking triggers another DMA channel at the end of each minor loop
+/// iteration (minor linking), at the end of the major loop (major linking),
+/// or both. Minor linking reduces the maximum `major_loop_count` from 32767
+/// to 511.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChannelLink {
+    /// No channel linking (default behavior).
+    None,
+    /// Trigger `channel` after each minor loop iteration.
+    MinorLoop { channel: u8 },
+    /// Trigger `channel` after major loop completes.
+    MajorLoop { channel: u8 },
+    /// Minor loop triggers `minor_channel`, major loop triggers `major_channel`.
+    Both { minor_channel: u8, major_channel: u8 },
+}
+
+// ----- Scatter-Gather TCD -----
+
+/// A scatter-gather TCD descriptor matching the hardware layout.
+///
+/// Must be 32-byte aligned. When `CSR.ESG=1`, the DMA engine loads the
+/// next TCD from the address in `dlastsga` after major loop completion,
+/// enabling automatic descriptor chaining.
+///
+/// For circular chains, set the last TCD's `dlastsga` to point back to
+/// the first TCD.
+///
+/// `CSR.ESG` and `CSR.DREQ` are mutually exclusive per the reference
+/// manual — when ESG=1, DREQ is ignored.
+#[repr(C, align(32))]
+#[derive(Clone, Copy)]
+pub struct ScatterGatherTcd {
+    pub saddr: u32,
+    pub soff: u16,
+    pub attr: u16,
+    pub nbytes: u32,
+    pub slast: u32,
+    pub daddr: u32,
+    pub doff: u16,
+    pub citer: u16,
+    pub dlastsga: u32,
+    pub csr: u16,
+    pub biter: u16,
+}
+
+impl ScatterGatherTcd {
+    /// Create a zeroed TCD.
+    pub const fn new() -> Self {
+        Self {
+            saddr: 0,
+            soff: 0,
+            attr: 0,
+            nbytes: 0,
+            slast: 0,
+            daddr: 0,
+            doff: 0,
+            citer: 0,
+            dlastsga: 0,
+            csr: 0,
+            biter: 0,
+        }
+    }
+
+    /// Encode ATTR field from source and destination transfer sizes.
+    pub const fn attr_from_sizes(source: TransferSize, dest: TransferSize) -> u16 {
+        let ssize = match source {
+            TransferSize::Bits8 => 0,
+            TransferSize::Bits16 => 1,
+            TransferSize::Bits32 => 2,
+            TransferSize::Burst16 => 4,
+        };
+        let dsize = match dest {
+            TransferSize::Bits8 => 0,
+            TransferSize::Bits16 => 1,
+            TransferSize::Bits32 => 2,
+            TransferSize::Burst16 => 4,
+        };
+        (ssize << 8) | dsize
+    }
+
+    /// Build a TCD from a `TransferConfig`.
+    ///
+    /// Sets ESG=1 in CSR for scatter-gather mode. The caller must set
+    /// `dlastsga` to point to the next TCD in the chain.
+    pub fn from_config(config: &TransferConfig) -> Self {
+        Self {
+            saddr: config.source_addr,
+            soff: config.source_offset as u16,
+            attr: Self::attr_from_sizes(config.source_size, config.dest_size),
+            nbytes: config.minor_loop_bytes,
+            slast: config.source_last_adjust as u32,
+            daddr: config.dest_addr,
+            doff: config.dest_offset as u16,
+            citer: config.major_loop_count,
+            dlastsga: 0,
+            // ESG=1 (bit 4)
+            csr: 1 << 4,
+            biter: config.major_loop_count,
+        }
+    }
+
+    /// Set the next TCD address for scatter-gather chaining.
+    pub fn set_next(&mut self, next: *const ScatterGatherTcd) {
+        self.dlastsga = next as u32;
+    }
+}
+
 // ----- DMA Error -----
 
 /// DMA transfer error.
@@ -266,6 +380,7 @@ impl<const CH: u8> DmaChannel<CH> {
         // Disable channel before changing source
         dmamux.chcfg(ch).write(|w| w);
         // Write source and enable
+        // SAFETY: source is a 6-bit field (DmaSource masks to 0x3F).
         dmamux.chcfg(ch).write(|w| {
             unsafe { w.source().bits(source.0) }
                 .enbl()._1()
@@ -295,6 +410,10 @@ impl<const CH: u8> DmaChannel<CH> {
     pub unsafe fn configure(&mut self, config: &TransferConfig) {
         let dma = dma_regs();
         let tcd = dma.tcd(CH as usize);
+        // SAFETY for all TCD register writes below: Values come from the
+        // caller-validated TransferConfig. Signed-to-unsigned casts (i16→u16,
+        // i32→u32) preserve two's complement bit patterns as the hardware
+        // expects. Field widths match K20 TCD register definitions.
 
         // Source address
         tcd.saddr().write(|w| unsafe { w.saddr().bits(config.source_addr) });
@@ -350,10 +469,141 @@ impl<const CH: u8> DmaChannel<CH> {
         });
     }
 
+    /// Configure the TCD with channel linking.
+    ///
+    /// Like [`configure`](DmaChannel::configure), but also sets up channel
+    /// linking in the CITER/BITER and/or CSR registers.
+    ///
+    /// When minor loop linking is enabled, the maximum `major_loop_count`
+    /// is reduced from 32767 to 511 (9-bit field).
+    ///
+    /// # Safety
+    ///
+    /// Same requirements as [`configure`](DmaChannel::configure).
+    pub unsafe fn configure_linked(&mut self, config: &TransferConfig, link: ChannelLink) {
+        match link {
+            ChannelLink::None => {
+                // Delegate to existing configure()
+                self.configure(config);
+                return;
+            }
+            _ => {}
+        }
+
+        let dma = dma_regs();
+        let tcd = dma.tcd(CH as usize);
+
+        // Common TCD fields (same as configure())
+        tcd.saddr().write(|w| unsafe { w.saddr().bits(config.source_addr) });
+        tcd.soff().write(|w| unsafe { w.soff().bits(config.source_offset as u16) });
+        tcd.attr().write(|w| {
+            let w = unsafe { w.smod().bits(0).dmod().bits(0) };
+            let w = match config.source_size {
+                TransferSize::Bits8 => w.ssize().bits8(),
+                TransferSize::Bits16 => w.ssize().bits16(),
+                TransferSize::Bits32 => w.ssize().bits32(),
+                TransferSize::Burst16 => w.ssize().burst16(),
+            };
+            match config.dest_size {
+                TransferSize::Bits8 => w.dsize().bits8(),
+                TransferSize::Bits16 => w.dsize().bits16(),
+                TransferSize::Bits32 => w.dsize().bits32(),
+                TransferSize::Burst16 => w.dsize().burst16(),
+            }
+        });
+        tcd.nbytes_mlno().write(|w| unsafe { w.nbytes().bits(config.minor_loop_bytes) });
+        tcd.slast().write(|w| unsafe { w.slast().bits(config.source_last_adjust as u32) });
+        tcd.daddr().write(|w| unsafe { w.daddr().bits(config.dest_addr) });
+        tcd.doff().write(|w| unsafe { w.doff().bits(config.dest_offset as u16) });
+        tcd.dlastsga().write(|w| unsafe { w.dlastsga().bits(config.dest_last_adjust as u32) });
+
+        // CITER/BITER and CSR depend on linking mode
+        let minor_link = matches!(link, ChannelLink::MinorLoop { .. } | ChannelLink::Both { .. });
+        let (major_link, major_ch) = match link {
+            ChannelLink::MajorLoop { channel } => (true, channel),
+            ChannelLink::Both { major_channel, .. } => (true, major_channel),
+            _ => (false, 0),
+        };
+
+        if minor_link {
+            let minor_ch = match link {
+                ChannelLink::MinorLoop { channel } => channel,
+                ChannelLink::Both { minor_channel, .. } => minor_channel,
+                _ => unreachable!(),
+            };
+            // Use elinkyes variants: 9-bit count, 4-bit link channel, ELINK=1
+            tcd.citer_elinkyes().write(|w| {
+                unsafe { w.citer().bits(config.major_loop_count).linkch().bits(minor_ch) }
+                    .elink()._1()
+            });
+            tcd.biter_elinkyes().write(|w| {
+                unsafe { w.biter().bits(config.major_loop_count).linkch().bits(minor_ch) }
+                    .elink()._1()
+            });
+        } else {
+            // No minor linking — use elinkno variants
+            tcd.citer_elinkno().write(|w| {
+                unsafe { w.citer().bits(config.major_loop_count) }
+                    .elink()._0()
+            });
+            tcd.biter_elinkno().write(|w| {
+                unsafe { w.biter().bits(config.major_loop_count) }
+                    .elink()._0()
+            });
+        }
+
+        // CSR: DREQ + optional major loop linking
+        if major_link {
+            tcd.csr().write(|w| {
+                unsafe { w.majorlinkch().bits(major_ch) }
+                    .dreq()._1()
+                    .majorelink()._1()
+            });
+        } else {
+            tcd.csr().write(|w| w.dreq()._1());
+        }
+    }
+
+    /// Configure the TCD for scatter-gather operation.
+    ///
+    /// Copies the first TCD from a scatter-gather chain into the hardware
+    /// TCD registers. When the major loop completes, the DMA engine
+    /// automatically loads the next TCD from `dlastsga`.
+    ///
+    /// # Safety
+    ///
+    /// - All TCDs in the chain must be `'static` — the DMA engine reads
+    ///   them asynchronously after major loop completion.
+    /// - TCDs must be 32-byte aligned (enforced by `#[repr(align(32))]`).
+    /// - Circular chains must have the last TCD's `dlastsga` pointing
+    ///   back to the first TCD.
+    /// - Source and destination addresses in each TCD must be valid and
+    ///   properly aligned.
+    pub unsafe fn configure_scatter_gather(&mut self, first_tcd: &'static ScatterGatherTcd) {
+        let dma = dma_regs();
+        let tcd = dma.tcd(CH as usize);
+
+        tcd.saddr().write(|w| unsafe { w.saddr().bits(first_tcd.saddr) });
+        tcd.soff().write(|w| unsafe { w.soff().bits(first_tcd.soff) });
+        tcd.attr().write(|w| unsafe { w.bits(first_tcd.attr) });
+        tcd.nbytes_mlno().write(|w| unsafe { w.nbytes().bits(first_tcd.nbytes) });
+        tcd.slast().write(|w| unsafe { w.slast().bits(first_tcd.slast) });
+        tcd.daddr().write(|w| unsafe { w.daddr().bits(first_tcd.daddr) });
+        tcd.doff().write(|w| unsafe { w.doff().bits(first_tcd.doff) });
+        tcd.citer_elinkno().write(|w| unsafe { w.bits(first_tcd.citer) });
+        tcd.dlastsga().write(|w| unsafe { w.dlastsga().bits(first_tcd.dlastsga) });
+        // Set ESG=1 in CSR, overriding whatever the TCD struct had
+        tcd.csr().write(|w| w.esg()._1());
+        tcd.biter_elinkno().write(|w| unsafe { w.bits(first_tcd.biter) });
+    }
+
     // --- Transfer Control ---
 
     /// Enable hardware DMA requests for this channel (set ERQ bit via SERQ).
     pub fn enable_request(&mut self) {
+        // SAFETY: CH is a const generic validated at channel construction.
+        // This same rationale applies to all similar DMA command register
+        // writes (cerq, ssrt, cdne, cint, cerr, seei, ceei) in this impl.
         dma_regs().serq().write(|w| unsafe { w.serq().bits(CH) });
     }
 
@@ -524,6 +774,7 @@ impl<const CH: u8> DmaChannel<CH> {
             source_size: transfer_size,
             dest_size: transfer_size,
             source_offset: 0,
+            // TransferSize::bytes() returns at most 16, which fits in i16.
             dest_offset: ts_bytes as i16,
             minor_loop_bytes: ts_bytes,
             major_loop_count: count,
@@ -575,7 +826,11 @@ impl<const CH: u8> DmaChannel<CH> {
 ///
 /// Ties the lifetime of the buffer to the transfer, preventing
 /// the buffer from being freed or modified while DMA is active.
-/// Dropping the handle aborts the transfer.
+///
+/// **Drop behavior:** Dropping this value aborts the in-progress DMA
+/// transfer by disabling hardware requests and clearing status flags.
+/// If you want the transfer to complete, call [`wait()`](DmaTransfer::wait)
+/// instead of dropping.
 pub struct DmaTransfer<'a, const CH: u8> {
     pub(crate) channel: &'a mut DmaChannel<CH>,
 }
@@ -592,6 +847,10 @@ impl<'a, const CH: u8> DmaTransfer<'a, CH> {
     }
 
     /// Block until the transfer completes or errors.
+    ///
+    /// Consumes the transfer handle without running its Drop impl (which
+    /// would abort the transfer). On success, returns the DMA channel
+    /// for reuse. On error, the channel is cleaned up before returning.
     pub fn wait(self) -> Result<&'a mut DmaChannel<CH>, DmaError> {
         loop {
             if self.channel.has_error() {
@@ -605,6 +864,10 @@ impl<'a, const CH: u8> DmaTransfer<'a, CH> {
             if self.channel.is_complete() {
                 self.channel.clear_done();
                 self.channel.disable_request();
+                // SAFETY: We need to return the &'a mut DmaChannel while
+                // preventing Drop from running (it would abort the completed
+                // transfer). The raw pointer preserves the original 'a lifetime
+                // from self.channel, and forget() suppresses the Drop impl.
                 let ch_ptr = self.channel as *const DmaChannel<CH> as *mut DmaChannel<CH>;
                 core::mem::forget(self);
                 return Ok(unsafe { &mut *ch_ptr });
@@ -687,6 +950,8 @@ impl DmaExt for pac::Dma {
 
         // Set default channel priorities: channel N gets priority N, preemptable
         for ch in 0..NUM_CHANNELS as u8 {
+            // SAFETY: ch iterates 0..NUM_CHANNELS, fitting in the 4-bit
+            // chpri field. dchpri_index handles the byte-swap addressing.
             dma.dchpri(dchpri_index(ch)).write(|w| {
                 unsafe { w.chpri().bits(ch) }
                     .ecp()._1()
@@ -735,6 +1000,10 @@ impl DmaExt for pac::Dma {
 
 #[cfg(feature = "async")]
 mod async_impl {
+    //! Async support assumes a single-executor, single-core environment.
+    //! Global wakers are used per channel — only one task may await a
+    //! given channel's completion at a time.
+
     use super::*;
     use embassy_sync::waitqueue::AtomicWaker;
 
@@ -768,9 +1037,16 @@ mod async_impl {
 
     /// Call from a DMA channel interrupt handler. Clears the interrupt flag
     /// and wakes the corresponding waker.
+    ///
+    /// Silently ignores channel numbers >= NUM_CHANNELS (prevents panic on
+    /// misrouted interrupts).
     pub fn on_dma_interrupt(ch: u8) {
+        if (ch as usize) >= DMA_WAKERS.len() {
+            return;
+        }
         let dma = dma_regs();
-        // Clear interrupt request flag
+        // SAFETY: ch is validated above to be within range. The cint field
+        // accepts a channel number to clear a single channel's interrupt flag.
         dma.cint().write(|w| unsafe { w.cint().bits(ch) });
         DMA_WAKERS[ch as usize].wake();
     }

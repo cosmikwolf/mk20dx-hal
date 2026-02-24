@@ -32,11 +32,15 @@ pub struct Pin<const PORT: char, const N: u8, MODE = Disabled> {
 impl<const PORT: char, const N: u8, MODE> Pin<PORT, N, MODE> {
     /// Get a reference to the PORT register block for this pin.
     fn port(&self) -> &pac::porta::RegisterBlock {
+        // SAFETY: PORT is a const generic constrained to 'A'-'E' by the
+        // gpio_port_impl! macro. port_ptr() returns a valid register block
+        // pointer for these values.
         unsafe { &*port_ptr(PORT) }
     }
 
     /// Get a reference to the GPIO register block for this pin.
     fn gpio(&self) -> &pac::pta::RegisterBlock {
+        // SAFETY: Same constraint as port() — PORT is 'A'-'E'.
         unsafe { &*gpio_ptr(PORT) }
     }
 
@@ -44,7 +48,9 @@ impl<const PORT: char, const N: u8, MODE> Pin<PORT, N, MODE> {
     pub fn into_floating_input(self) -> Pin<PORT, N, Input<Floating>> {
         let port = self.port();
         let gpio = self.gpio();
-        // Set as input in GPIO direction register
+        // SAFETY: Read-modify-write on PDDR. N is a const generic 0-31
+        // (bounded by GPIO hardware), so the bit mask is valid. This same
+        // rationale applies to all PDDR/PSOR/PCOR/PTOR bit manipulations.
         gpio.pddr().modify(|r, w| unsafe { w.bits(r.bits() & !(1 << N)) });
         // Set MUX to GPIO, disable pull
         port.pcr(N as usize).write(|w| {
@@ -84,7 +90,7 @@ impl<const PORT: char, const N: u8, MODE> Pin<PORT, N, MODE> {
     pub fn into_push_pull_output(self) -> Pin<PORT, N, Output<PushPull>> {
         let port = self.port();
         let gpio = self.gpio();
-        // Set as output in GPIO direction register
+        // SAFETY: Setting bit N in PDDR to configure as output.
         gpio.pddr().modify(|r, w| unsafe { w.bits(r.bits() | (1 << N)) });
         // Set MUX to GPIO, disable open drain
         port.pcr(N as usize).write(|w| {
@@ -109,6 +115,8 @@ impl<const PORT: char, const N: u8, MODE> Pin<PORT, N, MODE> {
     /// Configure for an alternate function (peripheral mux).
     pub fn into_alternate<const MUX: u8>(self) -> Pin<PORT, N, Alternate<MUX>> {
         let port = self.port();
+        // SAFETY: MUX is a 3-bit field (0-7); the const generic is constrained
+        // by the caller to valid alternate function values.
         port.pcr(N as usize).modify(|_, w| unsafe {
             w.mux().bits(MUX)
         });
@@ -146,13 +154,13 @@ impl<const PORT: char, const N: u8, TYPE> embedded_hal::digital::OutputPin
     for Pin<PORT, N, Output<TYPE>>
 {
     fn set_high(&mut self) -> Result<(), Self::Error> {
-        // PSOR is write-only, set-on-write — atomic, no read-modify-write needed
+        // SAFETY: PSOR is a write-only set register; writing bit N sets that output.
         self.gpio().psor().write(|w| unsafe { w.bits(1 << N) });
         Ok(())
     }
 
     fn set_low(&mut self) -> Result<(), Self::Error> {
-        // PCOR is write-only, clear-on-write — atomic
+        // SAFETY: PCOR is a write-only clear register; writing bit N clears that output.
         self.gpio().pcor().write(|w| unsafe { w.bits(1 << N) });
         Ok(())
     }
@@ -170,7 +178,7 @@ impl<const PORT: char, const N: u8, TYPE> embedded_hal::digital::StatefulOutputP
     }
 
     fn toggle(&mut self) -> Result<(), Self::Error> {
-        // PTOR is write-only, toggle-on-write — atomic
+        // SAFETY: PTOR is a write-only toggle register; writing bit N toggles that output.
         self.gpio().ptor().write(|w| unsafe { w.bits(1 << N) });
         Ok(())
     }
@@ -364,7 +372,8 @@ impl sealed_pins::Sealed for Pin<'D', 6, Alternate<4>> {}
 impl Ftm0Ch6Pin for Pin<'D', 6, Alternate<4>> {}
 
 impl Ftm0Ch7Pin for Pin<'A', 2, Alternate<3>> {} // A2 ALT3 already sealed above for Uart0TxPin
-impl Ftm0Ch7Pin for Pin<'D', 7, Alternate<3>> {} // D7 ALT3 already sealed above for Uart0TxPin
+impl sealed_pins::Sealed for Pin<'D', 7, Alternate<4>> {}
+impl Ftm0Ch7Pin for Pin<'D', 7, Alternate<4>> {}
 
 /// Valid pin for FTM1 channel 0 (ALT3: PA12, PB0).
 pub trait Ftm1Ch0Pin: sealed_pins::Sealed {}
@@ -402,6 +411,10 @@ impl Ftm2Ch1Pin for Pin<'B', 19, Alternate<3>> {}
 
 // ----- Port pointer lookup -----
 
+/// Convert a port letter to its PORT register block pointer.
+///
+/// The panic branch is unreachable in practice — `PORT` is a const generic
+/// constrained by the `gpio_port_impl!` macro to 'A'-'E'.
 const fn port_ptr(port: char) -> *const pac::porta::RegisterBlock {
     match port {
         'A' => pac::Porta::PTR,
@@ -413,6 +426,9 @@ const fn port_ptr(port: char) -> *const pac::porta::RegisterBlock {
     }
 }
 
+/// Convert a port letter to its GPIO register block pointer.
+///
+/// The panic branch is unreachable — see [`port_ptr`].
 const fn gpio_ptr(port: char) -> *const pac::pta::RegisterBlock {
     match port {
         'A' => pac::Pta::PTR,
@@ -540,6 +556,10 @@ gpio_port_impl!(
 
 #[cfg(feature = "async")]
 mod async_impl {
+    //! Async support assumes a single-executor, single-core environment.
+    //! Each port shares one waker — only one task may await a pin event
+    //! per port at a time (all pins on the same port share a waker).
+
     use super::*;
     use core::sync::atomic::{AtomicU32, Ordering};
     use embassy_sync::waitqueue::AtomicWaker;
@@ -580,6 +600,8 @@ mod async_impl {
         let isfr = port_regs.isfr().read().bits();
         if isfr != 0 {
             // Clear all pending flags (w1c)
+            // SAFETY: Writing back the read ISFR value clears exactly the
+            // flags that were set (w1c register).
             port_regs.isfr().write(|w| unsafe { w.bits(isfr) });
             // Record which pins fired
             PORT_PENDING[port_index(port)].fetch_or(isfr, Ordering::SeqCst);

@@ -22,6 +22,7 @@ use crate::pac;
 
 /// Access the PIT register block.
 fn regs() -> &'static pac::pit::RegisterBlock {
+    // SAFETY: PTR is a valid pointer to the PIT register block.
     unsafe { &*pac::Pit::PTR }
 }
 
@@ -46,7 +47,10 @@ impl<const CH: u8> PitChannel<CH> {
     ///
     /// Restarts the counter from the new load value immediately.
     /// Maximum period depends on bus clock (~119 s at 36 MHz, ~179 s at 24 MHz).
-    /// Values exceeding the 32-bit counter range are clamped to the maximum.
+    ///
+    /// **Note:** Values exceeding the 32-bit counter range are silently
+    /// clamped to `u32::MAX` ticks. Use [`start_ticks()`](PitChannel::start_ticks)
+    /// for precise control.
     pub fn start(&mut self, period: fugit::MicrosDurationU32) {
         let us = period.ticks() as u64;
         let ticks = (us * self.bus_clk as u64 / 1_000_000)
@@ -65,6 +69,7 @@ impl<const CH: u8> PitChannel<CH> {
         let ch = CH as usize;
         // Disable → load → clear flag → enable
         pit.tctrl(ch).modify(|_, w| w.ten()._0());
+        // SAFETY: tsv is a 32-bit field that accepts any u32 value.
         pit.ldval(ch).write(|w| unsafe { w.tsv().bits(ticks) });
         pit.tflg(ch).write(|w| w.tif()._1());
         pit.tctrl(ch).modify(|_, w| w.ten()._1());
@@ -155,6 +160,10 @@ impl PitExt for pac::Pit {
 
 #[cfg(feature = "async")]
 mod async_impl {
+    //! Async support assumes a single-executor, single-core environment.
+    //! Each PIT channel has one waker — only one task may await a given
+    //! channel at a time.
+
     use super::*;
     use core::future::Future;
     use core::pin::Pin;
@@ -241,6 +250,7 @@ mod async_impl {
             let ch = CH as usize;
             // Stop → load → clear flag → enable with interrupt
             pit.tctrl(ch).modify(|_, w| w.ten()._0());
+            // SAFETY: tsv is a 32-bit field that accepts any u32 value.
             pit.ldval(ch).write(|w| unsafe { w.tsv().bits(ticks) });
             pit.tflg(ch).write(|w| w.tif()._1());
             pit.tctrl(ch).write(|w| w.ten()._1().tie()._1());
@@ -250,7 +260,7 @@ mod async_impl {
 
     impl<const CH: u8> embedded_hal_async::delay::DelayNs for PitChannel<CH> {
         async fn delay_ns(&mut self, ns: u32) {
-            let us = (ns + 999) / 1000;
+            let us = ns.saturating_add(999) / 1000;
             if us > 0 {
                 self.delay_us(us).await;
             }

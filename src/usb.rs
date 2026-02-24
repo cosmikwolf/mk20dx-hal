@@ -64,10 +64,13 @@ const ISTAT_STALL: u8 = 1 << 7;
 // ---------------------------------------------------------------------------
 
 fn usb_regs() -> &'static pac::usb0::RegisterBlock {
+    // SAFETY: PTR is a valid pointer to the USB0 register block, which is
+    // memory-mapped I/O that exists for the lifetime of the program.
     unsafe { &*pac::Usb0::PTR }
 }
 
 fn sim_regs() -> &'static pac::sim::RegisterBlock {
+    // SAFETY: PTR is a valid pointer to the SIM register block.
     unsafe { &*pac::Sim::PTR }
 }
 
@@ -113,10 +116,12 @@ const fn bdt_index(ep: usize, tx: bool, odd: bool) -> usize {
     ep * 4 + if tx { 2 } else { 0 } + if odd { 1 } else { 0 }
 }
 
+/// Extract the byte count from a completed BDT descriptor (bits [25:16]).
 fn bd_byte_count(desc: u32) -> u16 {
     ((desc >> 16) & 0x3FF) as u16
 }
 
+/// Extract the PID token from a completed BDT descriptor (bits [5:2]).
 fn bd_pid(desc: u32) -> u8 {
     ((desc >> 2) & 0xF) as u8
 }
@@ -136,6 +141,38 @@ fn make_bd_desc(byte_count: u16, data1: bool, own: bool, dts: bool, stall: bool)
         desc |= BD_STALL;
     }
     desc
+}
+
+/// Read a BDT descriptor using a volatile read.
+///
+/// The USB hardware controller modifies BDT entries asynchronously when
+/// it completes a transfer (clearing OWN, writing byte count and PID).
+/// Volatile reads ensure we see the hardware's latest write.
+fn bdt_read_desc(idx: usize) -> u32 {
+    // SAFETY: idx is always computed via bdt_index() which is bounded by
+    // NUM_ENDPOINTS * 4. The BDT static is only accessed through these
+    // helpers and the reset path (which runs with USB disabled).
+    unsafe {
+        let bdt_ptr = &raw const BDT;
+        core::ptr::read_volatile(&raw const (*bdt_ptr).entries[idx].desc)
+    }
+}
+
+/// Write a BDT entry (address + descriptor) using volatile writes.
+///
+/// The address must be written before the descriptor because the USB
+/// controller reads the address as soon as OWN is set in the descriptor.
+/// A compiler fence ensures the ordering is preserved.
+fn bdt_write(idx: usize, desc: u32, addr: u32) {
+    // SAFETY: idx is bounded by NUM_ENDPOINTS * 4 (see bdt_index()).
+    // Volatile writes ensure the hardware sees our updates. The Release
+    // fence guarantees addr is visible before desc (which contains OWN).
+    unsafe {
+        let bdt_ptr = &raw mut BDT;
+        core::ptr::write_volatile(&raw mut (*bdt_ptr).entries[idx].addr, addr);
+        core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Release);
+        core::ptr::write_volatile(&raw mut (*bdt_ptr).entries[idx].desc, desc);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -211,7 +248,9 @@ pub struct UsbBus {
     inner: UnsafeCell<Inner>,
 }
 
-// Safety: single-core Cortex-M4, USB accessed from one context at a time.
+// SAFETY: Single-core Cortex-M4 with no preemptive threading. The USB bus
+// is accessed from a single context (the USB polling loop). The UnsafeCell
+// interior mutability is safe because there is no concurrent access.
 unsafe impl Send for UsbBus {}
 unsafe impl Sync for UsbBus {}
 
@@ -223,10 +262,14 @@ impl UsbBus {
     }
 
     fn inner(&self) -> &Inner {
+        // SAFETY: Single-core Cortex-M4, USB accessed from one context.
+        // UsbBusTrait methods take &self but are only called from the USB
+        // polling loop. No concurrent access occurs.
         unsafe { &*self.inner.get() }
     }
 
     fn inner_mut(&self) -> &mut Inner {
+        // SAFETY: Same invariant as inner(). Single-core, single-context USB access.
         unsafe { &mut *self.inner.get() }
     }
 
@@ -241,13 +284,10 @@ impl UsbBus {
             true, // DTS
             false,
         );
-        unsafe {
-            let buf_addr = EP_BUFS.bufs[idx].as_ptr() as u32;
-            BDT.entries[idx].addr = buf_addr;
-            // Write descriptor last (compiler fence)
-            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Release);
-            BDT.entries[idx].desc = desc;
-        }
+        // SAFETY: EP_BUFS is a static buffer pool that exists for the program's
+        // lifetime. The index is computed from a valid endpoint number.
+        let buf_addr = unsafe { EP_BUFS.bufs[idx].as_ptr() as u32 };
+        bdt_write(idx, desc, buf_addr);
     }
 
     /// Configure endpoint 0 for control transfers after reset.
@@ -280,6 +320,8 @@ impl UsbBusTrait for UsbBus {
     // The Kinetis USB-FS sets the address immediately, so we need
     // set_device_address called before the status stage completes.
     const QUIRK_SET_ADDRESS_BEFORE_STATUS: bool = false;
+
+    // --- Endpoint Allocation ---
 
     fn alloc_ep(
         &mut self,
@@ -333,6 +375,8 @@ impl UsbBusTrait for UsbBus {
         Ok(EndpointAddress::from_parts(ep_index, ep_dir))
     }
 
+    // --- Bus Lifecycle ---
+
     fn enable(&mut self) {
         let usb = usb_regs();
         let sim = sim_regs();
@@ -348,6 +392,7 @@ impl UsbBusTrait for UsbBus {
         // Configure USB clock divider: USB_CLK = PLL × (USBFRAC+1) / (USBDIV+1)
         #[cfg(feature = "mk20d7")]
         {
+            // SAFETY: USBDIV is a 3-bit field; value 2 fits.
             // 72 MHz PLL: 72 × 2/3 = 48 MHz (USBFRAC=1, USBDIV=2)
             sim.clkdiv2().write(|w| unsafe {
                 w.usbfrac().set_bit()
@@ -356,6 +401,7 @@ impl UsbBusTrait for UsbBus {
         }
         #[cfg(feature = "mk20d5")]
         {
+            // SAFETY: USBDIV is a 3-bit field; value 0 fits.
             // 48 MHz PLL: 48 × 1/1 = 48 MHz (USBFRAC=0, USBDIV=0)
             sim.clkdiv2().write(|w| unsafe {
                 w.usbdiv().bits(0)
@@ -367,12 +413,15 @@ impl UsbBusTrait for UsbBus {
 
         // --- Initialize USB peripheral ---
 
+        // SAFETY: bdtba fields accept the respective address bits. The BDT
+        // static is 512-byte aligned (repr(C, align(512))).
         // Set BDT base address
         let bdt_addr = &raw const BDT as u32;
         usb.bdtpage1().write(|w| unsafe { w.bdtba().bits(((bdt_addr >> 9) & 0x7F) as u8) });
         usb.bdtpage2().write(|w| unsafe { w.bdtba().bits((bdt_addr >> 16) as u8) });
         usb.bdtpage3().write(|w| unsafe { w.bdtba().bits((bdt_addr >> 24) as u8) });
 
+        // SAFETY: Writing 0xFF to w1c status registers clears all flags.
         // Clear all interrupt flags (w1c)
         usb.istat().write(|w| unsafe { w.bits(0xFF) });
         usb.errstat().write(|w| unsafe { w.bits(0xFF) });
@@ -407,16 +456,14 @@ impl UsbBusTrait for UsbBus {
         let usb = usb_regs();
         let inner = self.inner_mut();
 
+        // SAFETY: addr is a 7-bit field; masked to fit.
         // Clear USB address
         usb.addr().write(|w| unsafe { w.addr().bits(0) });
 
-        // Reset all BDT entries
-        unsafe {
-            let bdt_ptr = &raw mut BDT;
-            for entry in (*bdt_ptr).entries.iter_mut() {
-                entry.desc = 0;
-                entry.addr = 0;
-            }
+        // Clear all BDT entries with volatile writes — USB hardware may
+        // still be reading these until ODDRST completes below.
+        for i in 0..NUM_ENDPOINTS * 4 {
+            bdt_write(i, 0, 0);
         }
 
         // Reset ODD toggle
@@ -478,8 +525,11 @@ impl UsbBusTrait for UsbBus {
     }
 
     fn set_device_address(&self, addr: u8) {
+        // SAFETY: addr is a 7-bit field; masked to fit.
         usb_regs().addr().write(|w| unsafe { w.addr().bits(addr & 0x7F) });
     }
+
+    // --- Data Transfer ---
 
     fn write(&self, ep_addr: EndpointAddress, buf: &[u8]) -> usb_device::Result<usize> {
         let ep = ep_addr.index();
@@ -503,12 +553,14 @@ impl UsbBusTrait for UsbBus {
         let idx = bdt_index(ep, true, odd);
 
         // Check that the buffer is not owned by USB
-        let bd_desc = unsafe { BDT.entries[idx].desc };
+        let bd_desc = bdt_read_desc(idx);
         if bd_desc & BD_OWN != 0 {
             return Err(UsbError::WouldBlock);
         }
 
-        // Copy data into TX buffer
+        // SAFETY: EP_BUFS is a static buffer pool. The index is valid (bounded by
+        // NUM_ENDPOINTS * 4). OWN=0 was verified above, so USB hardware won't
+        // access this buffer until we set OWN=1 via bdt_write below.
         unsafe {
             EP_BUFS.bufs[idx][..len].copy_from_slice(&buf[..len]);
         }
@@ -522,12 +574,9 @@ impl UsbBusTrait for UsbBus {
             false,
         );
 
-        unsafe {
-            let buf_addr = EP_BUFS.bufs[idx].as_ptr() as u32;
-            BDT.entries[idx].addr = buf_addr;
-            core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::Release);
-            BDT.entries[idx].desc = desc;
-        }
+        // SAFETY: idx is valid, EP_BUFS is static.
+        let buf_addr = unsafe { EP_BUFS.bufs[idx].as_ptr() as u32 };
+        bdt_write(idx, desc, buf_addr);
 
         // Toggle for next transfer
         state.tx_data_toggle = !state.tx_data_toggle;
@@ -557,14 +606,15 @@ impl UsbBusTrait for UsbBus {
         let idx = bdt_index(ep, false, odd);
 
         // Read byte count from completed BD
-        let bd_desc = unsafe { BDT.entries[idx].desc };
+        let bd_desc = bdt_read_desc(idx);
         let count = bd_byte_count(bd_desc) as usize;
 
         if count > buf.len() {
             return Err(UsbError::BufferOverflow);
         }
 
-        // Copy data out
+        // SAFETY: OWN=0 (rx_ready was set by poll()), so USB hardware won't
+        // modify this buffer. The count is validated against buf.len() above.
         unsafe {
             buf[..count].copy_from_slice(&EP_BUFS.bufs[idx][..count]);
         }
@@ -587,6 +637,8 @@ impl UsbBusTrait for UsbBus {
 
         Ok(count)
     }
+
+    // --- Stall Management ---
 
     fn set_stalled(&self, ep_addr: EndpointAddress, stalled: bool) {
         let ep = ep_addr.index();
@@ -634,6 +686,8 @@ impl UsbBusTrait for UsbBus {
         }
     }
 
+    // --- Power Management ---
+
     fn suspend(&self) {
         let usb = usb_regs();
         // Put transceiver into suspend state
@@ -645,6 +699,8 @@ impl UsbBusTrait for UsbBus {
         // Wake transceiver from suspend
         usb.usbctrl().modify(|_, w| w.susp()._0());
     }
+
+    // --- Polling ---
 
     fn poll(&self) -> PollResult {
         let usb = usb_regs();
@@ -715,7 +771,7 @@ impl UsbBusTrait for UsbBus {
             } else {
                 // OUT or SETUP received
                 let idx = bdt_index(ep, false, is_odd);
-                let bd_desc = unsafe { BDT.entries[idx].desc };
+                let bd_desc = bdt_read_desc(idx);
                 let pid = bd_pid(bd_desc);
 
                 if pid == PID_SETUP {
@@ -789,6 +845,7 @@ impl UsbBusExt for pac::Usb0 {
         // Configure USB clock divider: USB_CLK = PLL × (USBFRAC+1) / (USBDIV+1)
         #[cfg(feature = "mk20d7")]
         {
+            // SAFETY: USBDIV is a 3-bit field; value 2 fits.
             // 72 MHz PLL: 72 × 2/3 = 48 MHz (USBFRAC=1, USBDIV=2)
             sim.clkdiv2().write(|w| unsafe {
                 w.usbfrac().set_bit()
@@ -797,6 +854,7 @@ impl UsbBusExt for pac::Usb0 {
         }
         #[cfg(feature = "mk20d5")]
         {
+            // SAFETY: USBDIV is a 3-bit field; value 0 fits.
             // 48 MHz PLL: 48 × 1/1 = 48 MHz (USBFRAC=0, USBDIV=0)
             sim.clkdiv2().write(|w| unsafe {
                 w.usbdiv().bits(0)

@@ -101,6 +101,7 @@ impl Mcg {
 
         // -- Step 2: FEI → FBE (FLL Bypassed External) --
         // Configure MCG C2 for very-high-frequency-range crystal oscillator
+        // SAFETY: range0 is a 2-bit field; value 2 selects very high frequency range.
         unsafe {
             mcg.c2().write(|w| {
                 w.range0().bits(2)   // Very high frequency range (8-32 MHz)
@@ -129,6 +130,8 @@ impl Mcg {
         #[cfg(feature = "mk20d7")]
         {
             // PRDIV=7 → 16/(7+1)=2 MHz, VDIV=12 → 2×(12+24)=72 MHz
+            // SAFETY: prdiv0 is a 5-bit field (value 7 fits), vdiv0 is a 5-bit
+            // field (value 12 fits). These configure PLL for 72 MHz output.
             unsafe {
                 mcg.c5().write(|w| w.prdiv0().bits(7));   // ÷8 → 2 MHz
                 mcg.c6().write(|w| w.vdiv0().bits(12)     // ×36 → 72 MHz
@@ -138,6 +141,8 @@ impl Mcg {
         #[cfg(feature = "mk20d5")]
         {
             // PRDIV=7 → 16/(7+1)=2 MHz, VDIV=0 → 2×(0+24)=48 MHz
+            // SAFETY: prdiv0 is a 5-bit field (value 7 fits), vdiv0 is a 5-bit
+            // field (value 0 fits). These configure PLL for 48 MHz output.
             unsafe {
                 mcg.c5().write(|w| w.prdiv0().bits(7));   // ÷8 → 2 MHz
                 mcg.c6().write(|w| w.vdiv0().bits(0)      // ×24 → 48 MHz
@@ -158,6 +163,10 @@ impl Mcg {
         while !mcg.s().read().clkst().is_11() {}
 
         // -- Done: return frozen clock frequencies --
+        // These frequencies are compile-time constants matching the SIM CLKDIV1
+        // divider configuration above and the PLL multiplication factors.
+        // They are not read back from hardware — the freeze() configuration
+        // is deterministic given the fixed 16 MHz Teensy crystal.
         #[cfg(feature = "mk20d7")]
         let clocks = Clocks {
             core_clk: Hertz::from_raw(72_000_000),
@@ -338,7 +347,17 @@ impl Clocks {
         }
     }
 
+    /// Access the MCG register block after the PAC peripheral was consumed.
+    ///
+    /// This is safe because the PAC `Mcg` is consumed by `freeze()` and never
+    /// reconstructed — no `steal()` call exists for MCG in this crate. Only
+    /// `Clocks` methods access MCG afterwards, and `enter_blpi()` consumes
+    /// `Clocks` while `exit_blpi()` consumes `BlpiClocks`, so at most one
+    /// context can access MCG registers at a time. This guarantees exclusive
+    /// access to MCG through the ownership chain.
     fn mcg_regs() -> &'static pac::mcg::RegisterBlock {
+        // SAFETY: PAC Mcg was consumed by freeze() and is never reconstructed.
+        // Exclusive access is enforced by the Clocks/BlpiClocks ownership chain.
         unsafe { &*pac::Mcg::PTR }
     }
 }

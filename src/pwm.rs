@@ -15,6 +15,7 @@ mod sealed {
 }
 
 fn ftm_regs<FTM: sealed::FtmInstance>() -> &'static pac::ftm0::RegisterBlock {
+    // SAFETY: FtmInstance::ptr() returns a valid register block pointer.
     unsafe { &*FTM::ptr() }
 }
 
@@ -41,6 +42,7 @@ impl sealed::FtmInstance for Ftm0 {
 
 impl sealed::FtmInstance for Ftm1 {
     fn ptr() -> *const pac::ftm0::RegisterBlock {
+        // SAFETY: FTM1 has identical register layout to FTM0.
         pac::Ftm1::PTR as *const pac::ftm0::RegisterBlock
     }
     fn enable_clock(sim: &pac::Sim) {
@@ -51,6 +53,7 @@ impl sealed::FtmInstance for Ftm1 {
 #[cfg(feature = "mk20d7")]
 impl sealed::FtmInstance for Ftm2 {
     fn ptr() -> *const pac::ftm0::RegisterBlock {
+        // SAFETY: FTM2 has identical register layout to FTM0.
         pac::Ftm2::PTR as *const pac::ftm0::RegisterBlock
     }
     fn enable_clock(sim: &pac::Sim) {
@@ -105,7 +108,9 @@ pub struct Ftm2Channels {
 ///
 /// Returns `(ps_idx, mod_val)` where `ps_idx` is 0..7 mapping to div1..div128,
 /// and `mod_val` is the MOD register value (period = MOD + 1 counts).
-fn calc_prescaler(bus_clk: u32, target_freq: u32) -> (u8, u16) {
+/// Prescaler divisors map to FTM SC PS field values 0-7
+/// (K20 ref manual Table 36-30 / K20P64M72SF1RM).
+pub fn calc_prescaler(bus_clk: u32, target_freq: u32) -> (u8, u16) {
     const DIVS: [u32; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
     for (idx, &div) in DIVS.iter().enumerate() {
         let counter_clk = bus_clk / div;
@@ -143,6 +148,7 @@ macro_rules! ftm_pwm_impl {
     }, $scgc_reg:ident, $scgc_field:ident) => {
         impl<const CH: u8> PwmChannel<$Instance, CH> {
             fn regs() -> &'static <$PacType as core::ops::Deref>::Target {
+                // SAFETY: PTR is a valid pointer to the FTM register block.
                 unsafe { &*<$PacType>::PTR }
             }
 
@@ -163,6 +169,22 @@ macro_rules! ftm_pwm_impl {
                 let ftm = Self::regs();
                 ftm.csc(CH as usize).write(|w| w);
             }
+
+            /// Enable DMA requests on channel match.
+            ///
+            /// When enabled, the FTM channel match event triggers a DMA request
+            /// (via DMAMUX source FTM0_CHn) instead of a CPU interrupt.
+            /// Both CnSC.DMA and CnSC.CHIE must be set for DMA triggering.
+            pub fn enable_dma(&mut self) {
+                let ftm = Self::regs();
+                ftm.csc(CH as usize).modify(|_, w| w.dma()._1().chie()._1());
+            }
+
+            /// Disable DMA requests on channel match.
+            pub fn disable_dma(&mut self) {
+                let ftm = Self::regs();
+                ftm.csc(CH as usize).modify(|_, w| w.dma()._0().chie()._0());
+            }
         }
 
         impl<const CH: u8> embedded_hal::pwm::ErrorType for PwmChannel<$Instance, CH> {
@@ -176,6 +198,7 @@ macro_rules! ftm_pwm_impl {
 
             fn set_duty_cycle(&mut self, duty: u16) -> Result<(), Self::Error> {
                 let ftm = Self::regs();
+                // SAFETY: val is a 16-bit field; duty is u16.
                 ftm.cv(CH as usize).write(|w| unsafe { w.val().bits(duty) });
                 Ok(())
             }
@@ -191,6 +214,7 @@ macro_rules! ftm_pwm_impl {
                 // Enable clock gate
                 sim.$scgc_reg().modify(|_, w| w.$scgc_field()._1());
 
+                // SAFETY: PTR is a valid pointer to the FTM register block.
                 let ftm = unsafe { &*<$PacType>::PTR };
 
                 // 1. Disable counter (CLKS=None)
@@ -199,7 +223,7 @@ macro_rules! ftm_pwm_impl {
                 // 2. Disable write protection
                 ftm.mode().write(|w| w.wpdis()._1());
 
-                // 3. Set counter initial value to 0
+                // SAFETY: init/mod_/count are 16-bit fields; values fit.
                 ftm.cntin().write(|w| unsafe { w.init().bits(0) });
 
                 // 4. Set modulo (period)
@@ -352,6 +376,7 @@ impl<FTM: sealed::FtmInstance, const CH: u8> InputCapture<FTM, CH> {
         let ftm = ftm_regs::<FTM>();
         let value = value & 0x0F;
         match CH {
+            // SAFETY: chNfval are 4-bit fields; value is masked to 0x0F above.
             0 => { ftm.filter().modify(|_, w| unsafe { w.ch0fval().bits(value) }); },
             1 => { ftm.filter().modify(|_, w| unsafe { w.ch1fval().bits(value) }); },
             2 => { ftm.filter().modify(|_, w| unsafe { w.ch2fval().bits(value) }); },
@@ -364,6 +389,20 @@ impl<FTM: sealed::FtmInstance, const CH: u8> InputCapture<FTM, CH> {
     pub fn clear_flag(&self) {
         let ftm = ftm_regs::<FTM>();
         ftm.csc(CH as usize).modify(|_, w| w);
+    }
+
+    /// Enable DMA requests on channel capture.
+    ///
+    /// Both CnSC.DMA and CnSC.CHIE must be set for DMA triggering.
+    pub fn enable_dma(&mut self) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.csc(CH as usize).modify(|_, w| w.dma()._1().chie()._1());
+    }
+
+    /// Disable DMA requests on channel capture.
+    pub fn disable_dma(&mut self) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.csc(CH as usize).modify(|_, w| w.dma()._0().chie()._0());
     }
 }
 
@@ -414,7 +453,7 @@ impl<FTM: sealed::FtmInstance, const CH: u8> OutputCompare<FTM, CH> {
         // Disable write protection
         ftm.mode().modify(|_, w| w.wpdis()._1());
 
-        // Set compare value
+        // SAFETY: val is a 16-bit field; compare is u16.
         ftm.cv(CH as usize).write(|w| unsafe { w.val().bits(compare) });
 
         // Configure channel for output compare: MSB=0, MSA=1
@@ -438,6 +477,7 @@ impl<FTM: sealed::FtmInstance, const CH: u8> OutputCompare<FTM, CH> {
     /// Set the compare value (CnV).
     pub fn set_compare(&mut self, value: u16) {
         let ftm = ftm_regs::<FTM>();
+        // SAFETY: val is a 16-bit field; value is u16.
         ftm.cv(CH as usize).write(|w| unsafe { w.val().bits(value) });
     }
 
@@ -478,6 +518,20 @@ impl<FTM: sealed::FtmInstance, const CH: u8> OutputCompare<FTM, CH> {
     pub fn clear_flag(&self) {
         let ftm = ftm_regs::<FTM>();
         ftm.csc(CH as usize).modify(|_, w| w);
+    }
+
+    /// Enable DMA requests on channel match.
+    ///
+    /// Both CnSC.DMA and CnSC.CHIE must be set for DMA triggering.
+    pub fn enable_dma(&mut self) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.csc(CH as usize).modify(|_, w| w.dma()._1().chie()._1());
+    }
+
+    /// Disable DMA requests on channel match.
+    pub fn disable_dma(&mut self) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.csc(CH as usize).modify(|_, w| w.dma()._0().chie()._0());
     }
 }
 
@@ -533,7 +587,7 @@ impl<FTM: sealed::FtmInstance> QuadratureDecoder<FTM> {
         // Enable FTM features mode and disable write protection
         ftm.mode().write(|w| w.ftmen()._1().wpdis()._1());
 
-        // Reset counter
+        // SAFETY: init/mod_/count are 16-bit fields; values fit.
         ftm.cntin().write(|w| unsafe { w.init().bits(0) });
         ftm.mod_().write(|w| unsafe { w.mod_().bits(0xFFFF) });
         ftm.cnt().write(|w| unsafe { w.count().bits(0) });
@@ -569,12 +623,14 @@ impl<FTM: sealed::FtmInstance> QuadratureDecoder<FTM> {
     /// Reset the counter to zero.
     pub fn reset_count(&mut self) {
         let ftm = ftm_regs::<FTM>();
+        // SAFETY: count is a 16-bit field; 0 fits.
         ftm.cnt().write(|w| unsafe { w.count().bits(0) });
     }
 
     /// Set the modulo value (counter wraps at MOD).
     pub fn set_modulo(&mut self, modulo: u16) {
         let ftm = ftm_regs::<FTM>();
+        // SAFETY: mod_ is a 16-bit field; modulo is u16.
         ftm.mod_().write(|w| unsafe { w.mod_().bits(modulo) });
     }
 
@@ -613,6 +669,7 @@ impl<FTM: sealed::FtmInstance> QuadratureDecoder<FTM> {
     /// period to `value` bus clock cycles.
     pub fn set_filter(&mut self, phase_a: u8, phase_b: u8) {
         let ftm = ftm_regs::<FTM>();
+        // SAFETY: chNfval are 4-bit fields; values masked to 0x0F.
         ftm.filter().modify(|_, w| unsafe {
             w.ch0fval().bits(phase_a & 0x0F)
              .ch1fval().bits(phase_b & 0x0F)

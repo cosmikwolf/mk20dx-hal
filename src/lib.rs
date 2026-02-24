@@ -26,9 +26,11 @@ pub mod flash;
 pub mod flash_config;
 pub mod gpio;
 pub mod i2c;
+// No feature gate needed — PDB0 exists on both mk20d5 and mk20d7
 pub mod llwu;
 pub mod lptmr;
 pub mod power;
+pub mod pdb;
 pub mod prelude;
 pub mod pwm;
 pub mod rtc;

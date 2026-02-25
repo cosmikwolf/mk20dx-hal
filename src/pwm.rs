@@ -61,45 +61,508 @@ impl sealed::FtmInstance for Ftm2 {
     }
 }
 
-// ----- Channel Type -----
+// =====================================================================
+// Prescaler
+// =====================================================================
 
-/// A single PWM output channel of an FTM peripheral.
+/// FTM counter clock prescaler divisor.
 ///
-/// Implements [`embedded_hal::pwm::SetDutyCycle`]. Call [`enable`](PwmChannel::enable)
-/// to start PWM output and [`disable`](PwmChannel::disable) to stop it.
+/// Maps directly to the SC.PS field values 0-7
+/// (K20 ref manual Table 36-30 / K20P64M72SF1RM).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum Prescaler {
+    Div1,
+    Div2,
+    Div4,
+    Div8,
+    Div16,
+    Div32,
+    Div64,
+    Div128,
+}
+
+impl Prescaler {
+    /// Convert prescaler to the SC.PS field index (0-7).
+    fn to_idx(self) -> u8 {
+        match self {
+            Prescaler::Div1 => 0,
+            Prescaler::Div2 => 1,
+            Prescaler::Div4 => 2,
+            Prescaler::Div8 => 3,
+            Prescaler::Div16 => 4,
+            Prescaler::Div32 => 5,
+            Prescaler::Div64 => 6,
+            Prescaler::Div128 => 7,
+        }
+    }
+
+    /// Convert SC.PS field index to a Prescaler variant.
+    fn from_idx(idx: u8) -> Self {
+        match idx {
+            0 => Prescaler::Div1,
+            1 => Prescaler::Div2,
+            2 => Prescaler::Div4,
+            3 => Prescaler::Div8,
+            4 => Prescaler::Div16,
+            5 => Prescaler::Div32,
+            6 => Prescaler::Div64,
+            _ => Prescaler::Div128,
+        }
+    }
+}
+
+// =====================================================================
+// PWM Alignment
+// =====================================================================
+
+/// PWM alignment mode (timer-wide setting).
 ///
-/// Pin MUX must be configured separately to route the FTM channel to a
-/// physical pin (typically ALT3 or ALT4 depending on the pin).
-pub struct PwmChannel<FTM, const CH: u8> {
-    mod_val: u16,
+/// Controls whether the FTM counter counts up only (edge-aligned) or
+/// up-down (center-aligned). Center-aligned mode produces symmetric
+/// waveforms, useful for motor control.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum PwmAlignment {
+    /// Edge-aligned PWM (counter counts up only). Period = MOD+1 ticks.
+    EdgeAligned,
+    /// Center-aligned PWM (counter counts up-down). Period = 2*MOD ticks.
+    CenterAligned,
+}
+
+// =====================================================================
+// FtmTimer — shared counter/period handle
+// =====================================================================
+
+/// Central FTM timer handle for shared counter, period, and prescaler operations.
+///
+/// Returned by [`FtmExt::split`]. Wraps the shared FTM registers (SC, MOD, CNT)
+/// in safe methods. All methods use static register pointers internally (zero-cost).
+pub struct FtmTimer<FTM> {
     _ftm: PhantomData<FTM>,
 }
 
-// ----- Channel Sets -----
+impl<FTM: sealed::FtmInstance> FtmTimer<FTM> {
+    /// Stop the counter (CLKS=None).
+    ///
+    /// With the counter stopped, MOD and CnV writes take effect immediately
+    /// (bypassing the write buffer that exists when the counter is running).
+    pub fn stop(&mut self) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.sc().modify(|_, w| w.clks().none());
+    }
+
+    /// Start the counter with the system (bus) clock.
+    pub fn start(&mut self) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.sc().modify(|_, w| w.clks().system());
+    }
+
+    /// Whether the counter is currently running (CLKS != None).
+    pub fn is_running(&self) -> bool {
+        let ftm = ftm_regs::<FTM>();
+        !ftm.sc().read().clks().is_none()
+    }
+
+    /// Set the modulo (period) value.
+    ///
+    /// The counter counts from CNTIN (0) to MOD, then wraps. The PWM period
+    /// is MOD + 1 counter ticks.
+    ///
+    /// If the counter is running, the write goes to a buffer and takes effect
+    /// at the next counter overflow. If the counter is stopped, the write
+    /// takes effect immediately.
+    pub fn set_modulo(&mut self, mod_val: u16) {
+        let ftm = ftm_regs::<FTM>();
+        // SAFETY: mod_ is a 16-bit field; mod_val is u16.
+        ftm.mod_().write(|w| unsafe { w.mod_().bits(mod_val) });
+    }
+
+    /// Read the current modulo value.
+    pub fn modulo(&self) -> u16 {
+        let ftm = ftm_regs::<FTM>();
+        ftm.mod_().read().mod_().bits()
+    }
+
+    /// Reset the counter to CNTIN (0).
+    ///
+    /// Writing any value to CNT loads CNTIN into the counter.
+    pub fn reset_counter(&mut self) {
+        let ftm = ftm_regs::<FTM>();
+        // SAFETY: count is a 16-bit field; 0 fits.
+        ftm.cnt().write(|w| unsafe { w.count().bits(0) });
+    }
+
+    /// Read the current counter value.
+    pub fn counter(&self) -> u16 {
+        let ftm = ftm_regs::<FTM>();
+        ftm.cnt().read().count().bits()
+    }
+
+    /// Set the prescaler divisor.
+    ///
+    /// The prescaler divides the bus clock before it reaches the FTM counter.
+    /// Changing the prescaler while the counter is running takes effect
+    /// after the current prescaler count completes.
+    pub fn set_prescaler(&mut self, ps: Prescaler) {
+        let ftm = ftm_regs::<FTM>();
+        let idx = ps.to_idx();
+        ftm.sc().modify(|_, w| {
+            match idx {
+                0 => w.ps().div1(),
+                1 => w.ps().div2(),
+                2 => w.ps().div4(),
+                3 => w.ps().div8(),
+                4 => w.ps().div16(),
+                5 => w.ps().div32(),
+                6 => w.ps().div64(),
+                _ => w.ps().div128(),
+            }
+        });
+    }
+
+    /// Read the current prescaler setting.
+    pub fn prescaler(&self) -> Prescaler {
+        let ftm = ftm_regs::<FTM>();
+        Prescaler::from_idx(ftm.sc().read().ps().bits())
+    }
+
+    /// Calculate and set prescaler + MOD from a target frequency.
+    ///
+    /// Uses the bus clock from `clocks` to find the best prescaler and
+    /// modulo combination. Stops the counter, writes MOD, sets the
+    /// prescaler, and resets the counter. Does **not** restart — call
+    /// [`start`](Self::start) afterward.
+    pub fn set_frequency(&mut self, freq: Hertz, clocks: &Clocks) {
+        let bus_clk = clocks.bus_clk().raw();
+        let (ps_idx, mod_val) = calc_prescaler(bus_clk, freq.raw());
+
+        let ftm = ftm_regs::<FTM>();
+
+        // Stop counter so MOD write is immediate
+        ftm.sc().modify(|_, w| w.clks().none());
+
+        // Write MOD
+        // SAFETY: mod_ is a 16-bit field; mod_val is u16.
+        ftm.mod_().write(|w| unsafe { w.mod_().bits(mod_val) });
+
+        // Reset counter
+        // SAFETY: count is a 16-bit field; 0 fits.
+        ftm.cnt().write(|w| unsafe { w.count().bits(0) });
+
+        // Preserve current CPWMS setting
+        let cpwms = ftm.sc().read().cpwms().bit();
+
+        // Set prescaler (counter stays stopped)
+        ftm.sc().write(|w| {
+            let w = w.clks().none();
+            let w = if cpwms { w.cpwms()._1() } else { w.cpwms()._0() };
+            match ps_idx {
+                0 => w.ps().div1(),
+                1 => w.ps().div2(),
+                2 => w.ps().div4(),
+                3 => w.ps().div8(),
+                4 => w.ps().div16(),
+                5 => w.ps().div32(),
+                6 => w.ps().div64(),
+                _ => w.ps().div128(),
+            }
+        });
+    }
+
+    /// Set PWM alignment mode (edge-aligned or center-aligned).
+    ///
+    /// CPWMS is a timer-wide setting that affects all channels.
+    /// Should be set while counter is stopped (CLKS=None); otherwise
+    /// the change takes effect at the next counter overflow.
+    pub fn set_alignment(&mut self, alignment: PwmAlignment) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.sc().modify(|_, w| match alignment {
+            PwmAlignment::EdgeAligned => w.cpwms()._0(),
+            PwmAlignment::CenterAligned => w.cpwms()._1(),
+        });
+    }
+
+    /// Read the current alignment mode.
+    pub fn alignment(&self) -> PwmAlignment {
+        let ftm = ftm_regs::<FTM>();
+        if ftm.sc().read().cpwms().bit() {
+            PwmAlignment::CenterAligned
+        } else {
+            PwmAlignment::EdgeAligned
+        }
+    }
+}
+
+// =====================================================================
+// PWM Polarity
+// =====================================================================
+
+/// PWM output polarity.
+///
+/// Controls whether the active portion of the PWM cycle drives the
+/// output high or low. Works with both edge-aligned and center-aligned modes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum PwmPolarity {
+    /// High-true pulses (output high during active period). ELSB=1, ELSA=0.
+    HighTrue,
+    /// Low-true pulses (output low during active period). ELSB=0, ELSA=1.
+    LowTrue,
+}
+
+// =====================================================================
+// FtmChannel — unified per-channel handle
+// =====================================================================
+
+/// A single FTM channel handle supporting PWM, output compare, input capture, and DMA.
+///
+/// Returned by [`FtmExt::split`] as part of the FTM parts struct. Each channel
+/// can be independently configured for different modes. Implements
+/// [`embedded_hal::pwm::SetDutyCycle`] for PWM use.
+///
+/// Pin MUX must be configured separately to route the FTM channel to a
+/// physical pin (typically ALT3 or ALT4 depending on the pin).
+pub struct FtmChannel<FTM, const CH: u8> {
+    _ftm: PhantomData<FTM>,
+}
+
+impl<FTM: sealed::FtmInstance, const CH: u8> FtmChannel<FTM, CH> {
+    // --- Mode configuration ---
+
+    /// Configure for edge-aligned PWM (high-true pulses).
+    ///
+    /// Sets MSB:MSA=10, ELSB:ELSA=10. Output is set on counter wrap
+    /// (MOD→CNTIN) and cleared on CnV match.
+    pub fn set_pwm(&mut self) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.csc(CH as usize).write(|w| {
+            w.msb().set_bit()
+             .elsb().set_bit()
+        });
+    }
+
+    /// Configure for PWM with explicit polarity.
+    ///
+    /// `HighTrue`: output is high during the active duty cycle (default).
+    /// `LowTrue`: output is low during the active duty cycle (inverted).
+    ///
+    /// Works with both edge-aligned and center-aligned modes.
+    pub fn set_pwm_polarity(&mut self, polarity: PwmPolarity) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.csc(CH as usize).write(|w| {
+            let w = w.msb().set_bit();
+            match polarity {
+                PwmPolarity::HighTrue => w.elsb().set_bit(),
+                PwmPolarity::LowTrue => w.elsa().set_bit(),
+            }
+        });
+    }
+
+    /// Configure for output compare mode.
+    ///
+    /// Sets MSB=0, MSA=1, ELS per action. The channel output performs
+    /// `action` when the counter matches `compare`.
+    pub fn set_output_compare(&mut self, action: CompareAction, compare: u16) {
+        let ftm = ftm_regs::<FTM>();
+        // Configure CnSC for output compare BEFORE writing CnV.
+        ftm.csc(CH as usize).write(|w| {
+            let w = w.msa().set_bit();
+            match action {
+                CompareAction::Toggle => w.elsa().set_bit(),
+                CompareAction::Clear => w.elsb().set_bit(),
+                CompareAction::Set => w.elsa().set_bit().elsb().set_bit(),
+            }
+        });
+        // SAFETY: val is a 16-bit field; compare is u16.
+        ftm.cv(CH as usize).write(|w| unsafe { w.val().bits(compare) });
+    }
+
+    /// Configure for input capture mode.
+    ///
+    /// Sets MSB:MSA=00, ELS per edge. The channel captures the counter
+    /// value when the configured edge is detected.
+    pub fn set_input_capture(&mut self, edge: CaptureEdge) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.csc(CH as usize).write(|w| {
+            match edge {
+                CaptureEdge::Rising => w.elsa().set_bit(),
+                CaptureEdge::Falling => w.elsb().set_bit(),
+                CaptureEdge::Both => w.elsa().set_bit().elsb().set_bit(),
+            }
+        });
+    }
+
+    /// Disable the channel (CnSC = 0).
+    pub fn disable(&mut self) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.csc(CH as usize).write(|w| w);
+    }
+
+    // --- Value access ---
+
+    /// Set the compare/duty value (CnV).
+    ///
+    /// For PWM: sets duty cycle. For output compare: sets match value.
+    /// If the counter is running, the write goes to a buffer and latches
+    /// at the next counter overflow. If stopped, takes effect immediately.
+    pub fn set_value(&mut self, val: u16) {
+        let ftm = ftm_regs::<FTM>();
+        // SAFETY: val is a 16-bit field; val is u16.
+        ftm.cv(CH as usize).write(|w| unsafe { w.val().bits(val) });
+    }
+
+    /// Read the current CnV value.
+    pub fn value(&self) -> u16 {
+        let ftm = ftm_regs::<FTM>();
+        ftm.cv(CH as usize).read().val().bits()
+    }
+
+    // --- Flag & interrupt ---
+
+    /// Check if the channel flag (CHF) is set.
+    ///
+    /// For PWM/OC: set on CnV match. For IC: set on edge capture.
+    pub fn has_flag(&self) -> bool {
+        let ftm = ftm_regs::<FTM>();
+        ftm.csc(CH as usize).read().chf().is_1()
+    }
+
+    /// Clear the channel flag (CHF).
+    ///
+    /// CHF is cleared by reading CnSC (with CHF=1) then writing 0 to
+    /// the CHF bit position; `modify()` accomplishes this.
+    pub fn clear_flag(&mut self) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.csc(CH as usize).modify(|_, w| w);
+    }
+
+    /// Enable the channel interrupt (CHIE).
+    pub fn enable_interrupt(&mut self) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.csc(CH as usize).modify(|_, w| w.chie().set_bit());
+    }
+
+    /// Disable the channel interrupt (CHIE).
+    pub fn disable_interrupt(&mut self) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.csc(CH as usize).modify(|_, w| w.chie().clear_bit());
+    }
+
+    // --- DMA ---
+
+    /// Enable DMA requests on channel events.
+    ///
+    /// Both CnSC.DMA and CnSC.CHIE must be set for DMA triggering.
+    /// This method sets both bits, preserving the channel mode configuration.
+    pub fn enable_dma(&mut self) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.csc(CH as usize).modify(|_, w| w.dma()._1().chie()._1());
+    }
+
+    /// Disable DMA requests on channel events.
+    pub fn disable_dma(&mut self) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.csc(CH as usize).modify(|_, w| w.dma()._0().chie()._0());
+    }
+
+    // --- Input capture convenience ---
+
+    /// Read the captured value if the channel flag is set, clearing the flag.
+    ///
+    /// Returns `Some(value)` if a capture occurred, `None` otherwise.
+    pub fn capture(&mut self) -> Option<u16> {
+        let ftm = ftm_regs::<FTM>();
+        if ftm.csc(CH as usize).read().chf().is_1() {
+            let val = ftm.cv(CH as usize).read().val().bits();
+            ftm.csc(CH as usize).modify(|_, w| w);
+            Some(val)
+        } else {
+            None
+        }
+    }
+}
+
+impl<FTM: sealed::FtmInstance, const CH: u8> embedded_hal::pwm::ErrorType for FtmChannel<FTM, CH> {
+    type Error = Infallible;
+}
+
+impl<FTM: sealed::FtmInstance, const CH: u8> embedded_hal::pwm::SetDutyCycle for FtmChannel<FTM, CH> {
+    fn max_duty_cycle(&self) -> u16 {
+        let ftm = ftm_regs::<FTM>();
+        ftm.mod_().read().mod_().bits()
+    }
+
+    fn set_duty_cycle(&mut self, duty: u16) -> Result<(), Self::Error> {
+        self.set_value(duty);
+        Ok(())
+    }
+}
+
+// ----- Channel Sets (legacy, backward compat) -----
 
 /// PWM channels for FTM0 (8 channels).
+///
+/// Returned by [`FtmExt::pwm`] for backward compatibility.
+/// New code should use [`Ftm0Parts`] via [`FtmExt::split`].
 pub struct Ftm0Channels {
-    pub ch0: PwmChannel<Ftm0, 0>,
-    pub ch1: PwmChannel<Ftm0, 1>,
-    pub ch2: PwmChannel<Ftm0, 2>,
-    pub ch3: PwmChannel<Ftm0, 3>,
-    pub ch4: PwmChannel<Ftm0, 4>,
-    pub ch5: PwmChannel<Ftm0, 5>,
-    pub ch6: PwmChannel<Ftm0, 6>,
-    pub ch7: PwmChannel<Ftm0, 7>,
+    pub ch0: FtmChannel<Ftm0, 0>,
+    pub ch1: FtmChannel<Ftm0, 1>,
+    pub ch2: FtmChannel<Ftm0, 2>,
+    pub ch3: FtmChannel<Ftm0, 3>,
+    pub ch4: FtmChannel<Ftm0, 4>,
+    pub ch5: FtmChannel<Ftm0, 5>,
+    pub ch6: FtmChannel<Ftm0, 6>,
+    pub ch7: FtmChannel<Ftm0, 7>,
 }
 
 /// PWM channels for FTM1 (2 channels).
+///
+/// Returned by [`FtmExt::pwm`] for backward compatibility.
+/// New code should use [`Ftm1Parts`] via [`FtmExt::split`].
 pub struct Ftm1Channels {
-    pub ch0: PwmChannel<Ftm1, 0>,
-    pub ch1: PwmChannel<Ftm1, 1>,
+    pub ch0: FtmChannel<Ftm1, 0>,
+    pub ch1: FtmChannel<Ftm1, 1>,
 }
 
 /// PWM channels for FTM2 (2 channels, mk20d7 only).
+///
+/// Returned by [`FtmExt::pwm`] for backward compatibility.
+/// New code should use [`Ftm2Parts`] via [`FtmExt::split`].
 #[cfg(feature = "mk20d7")]
 pub struct Ftm2Channels {
-    pub ch0: PwmChannel<Ftm2, 0>,
-    pub ch1: PwmChannel<Ftm2, 1>,
+    pub ch0: FtmChannel<Ftm2, 0>,
+    pub ch1: FtmChannel<Ftm2, 1>,
+}
+
+// ----- Parts structs (new split API) -----
+
+/// Result of splitting FTM0 — timer handle + 8 channel handles.
+pub struct Ftm0Parts {
+    pub timer: FtmTimer<Ftm0>,
+    pub ch0: FtmChannel<Ftm0, 0>,
+    pub ch1: FtmChannel<Ftm0, 1>,
+    pub ch2: FtmChannel<Ftm0, 2>,
+    pub ch3: FtmChannel<Ftm0, 3>,
+    pub ch4: FtmChannel<Ftm0, 4>,
+    pub ch5: FtmChannel<Ftm0, 5>,
+    pub ch6: FtmChannel<Ftm0, 6>,
+    pub ch7: FtmChannel<Ftm0, 7>,
+}
+
+/// Result of splitting FTM1 — timer handle + 2 channel handles.
+pub struct Ftm1Parts {
+    pub timer: FtmTimer<Ftm1>,
+    pub ch0: FtmChannel<Ftm1, 0>,
+    pub ch1: FtmChannel<Ftm1, 1>,
+}
+
+/// Result of splitting FTM2 — timer handle + 2 channel handles (mk20d7 only).
+#[cfg(feature = "mk20d7")]
+pub struct Ftm2Parts {
+    pub timer: FtmTimer<Ftm2>,
+    pub ch0: FtmChannel<Ftm2, 0>,
+    pub ch1: FtmChannel<Ftm2, 1>,
 }
 
 // ----- Prescaler Calculation -----
@@ -125,87 +588,73 @@ pub fn calc_prescaler(bus_clk: u32, target_freq: u32) -> (u8, u16) {
 
 // ----- Extension Trait -----
 
-/// Extension trait for creating PWM channels from PAC FTM peripherals.
+/// Extension trait for FTM peripherals.
 ///
-/// Consumes the FTM peripheral and configures it for edge-aligned PWM
-/// at the requested frequency. Pin MUX must be configured separately
-/// (typically ALT3 or ALT4 depending on the pin).
+/// Provides two entry points:
+/// - [`split`](FtmExt::split) — returns a timer handle + per-channel handles.
+///   Use this for multi-mode FTM usage (PWM + OC + IC on the same timer).
+/// - [`pwm`](FtmExt::pwm) — convenience wrapper that configures for PWM at a
+///   given frequency and returns only channel handles. Use this for simple
+///   single-frequency PWM.
+///
+/// Both consume the PAC FTM peripheral to prevent register aliasing.
+/// Pin MUX must be configured separately (typically ALT3 or ALT4).
 pub trait FtmExt: Sized {
     type Channels;
+    type Parts;
+
+    /// Split the FTM into a timer handle and per-channel handles.
+    ///
+    /// Enables the clock gate, disables write protection, sets CNTIN=0,
+    /// and returns parts with the counter stopped. Call
+    /// [`FtmTimer::set_frequency`] or [`FtmTimer::set_modulo`] +
+    /// [`FtmTimer::start`] to begin operation.
+    fn split(self, clocks: &Clocks, sim: &pac::Sim) -> Self::Parts;
 
     /// Configure edge-aligned PWM at the given frequency.
     ///
-    /// Consumes the FTM peripheral. All channels start disabled;
-    /// call [`PwmChannel::enable`] on individual channels to start output.
+    /// Convenience wrapper: calls `split()`, sets frequency, starts the
+    /// counter, and returns only channel handles (timer handle is discarded).
+    /// All channels start disabled; call [`FtmChannel::set_pwm`] on
+    /// individual channels to start output.
     fn pwm(self, frequency: Hertz, clocks: &Clocks, sim: &pac::Sim) -> Self::Channels;
 }
 
 // ----- Per-instance macro -----
 
-macro_rules! ftm_pwm_impl {
-    ($PacType:ty, $Instance:ty, $Channels:ident {
-        $($ch_name:ident : $ch_idx:literal),+
-    }, $scgc_reg:ident, $scgc_field:ident) => {
-        impl<const CH: u8> PwmChannel<$Instance, CH> {
-            fn regs() -> &'static <$PacType as core::ops::Deref>::Target {
-                // SAFETY: PTR is a valid pointer to the FTM register block.
-                unsafe { &*<$PacType>::PTR }
-            }
-
-            /// Enable PWM output on this channel (edge-aligned, high-true).
-            ///
-            /// Sets MSB:MSA=10, ELSB:ELSA=10 for edge-aligned PWM with
-            /// high-true pulses (output set on counter wrap, cleared on CnV match).
-            pub fn enable(&mut self) {
-                let ftm = Self::regs();
-                ftm.csc(CH as usize).write(|w| {
-                    w.msb().set_bit()
-                     .elsb().set_bit()
-                });
-            }
-
-            /// Disable PWM output on this channel.
-            pub fn disable(&mut self) {
-                let ftm = Self::regs();
-                ftm.csc(CH as usize).write(|w| w);
-            }
-
-            /// Enable DMA requests on channel match.
-            ///
-            /// When enabled, the FTM channel match event triggers a DMA request
-            /// (via DMAMUX source FTM0_CHn) instead of a CPU interrupt.
-            /// Both CnSC.DMA and CnSC.CHIE must be set for DMA triggering.
-            pub fn enable_dma(&mut self) {
-                let ftm = Self::regs();
-                ftm.csc(CH as usize).modify(|_, w| w.dma()._1().chie()._1());
-            }
-
-            /// Disable DMA requests on channel match.
-            pub fn disable_dma(&mut self) {
-                let ftm = Self::regs();
-                ftm.csc(CH as usize).modify(|_, w| w.dma()._0().chie()._0());
-            }
-        }
-
-        impl<const CH: u8> embedded_hal::pwm::ErrorType for PwmChannel<$Instance, CH> {
-            type Error = core::convert::Infallible;
-        }
-
-        impl<const CH: u8> embedded_hal::pwm::SetDutyCycle for PwmChannel<$Instance, CH> {
-            fn max_duty_cycle(&self) -> u16 {
-                self.mod_val
-            }
-
-            fn set_duty_cycle(&mut self, duty: u16) -> Result<(), Self::Error> {
-                let ftm = Self::regs();
-                // SAFETY: val is a 16-bit field; duty is u16.
-                ftm.cv(CH as usize).write(|w| unsafe { w.val().bits(duty) });
-                Ok(())
-            }
-        }
-
+macro_rules! ftm_impl {
+    ($PacType:ty, $Instance:ty,
+     $Parts:ident { $($ch_name:ident : $ch_idx:literal),+ },
+     $Channels:ident { $($ch_name2:ident : $ch_idx2:literal),+ },
+     $scgc_reg:ident, $scgc_field:ident
+    ) => {
         impl FtmExt for $PacType {
             type Channels = $Channels;
+            type Parts = $Parts;
+
+            fn split(self, clocks: &Clocks, sim: &pac::Sim) -> $Parts {
+                let _ = clocks;
+
+                // Enable clock gate
+                sim.$scgc_reg().modify(|_, w| w.$scgc_field()._1());
+
+                let ftm = ftm_regs::<$Instance>();
+
+                // Stop counter
+                ftm.sc().write(|w| w.clks().none());
+
+                // Disable write protection
+                ftm.mode().write(|w| w.wpdis()._1());
+
+                // SAFETY: init/count are 16-bit fields; 0 fits.
+                ftm.cntin().write(|w| unsafe { w.init().bits(0) });
+                ftm.cnt().write(|w| unsafe { w.count().bits(0) });
+
+                $Parts {
+                    timer: FtmTimer { _ftm: PhantomData },
+                    $($ch_name: FtmChannel { _ftm: PhantomData },)+
+                }
+            }
 
             fn pwm(self, frequency: Hertz, clocks: &Clocks, sim: &pac::Sim) -> $Channels {
                 let bus_clk = clocks.bus_clk().raw();
@@ -214,8 +663,7 @@ macro_rules! ftm_pwm_impl {
                 // Enable clock gate
                 sim.$scgc_reg().modify(|_, w| w.$scgc_field()._1());
 
-                // SAFETY: PTR is a valid pointer to the FTM register block.
-                let ftm = unsafe { &*<$PacType>::PTR };
+                let ftm = ftm_regs::<$Instance>();
 
                 // 1. Disable counter (CLKS=None)
                 ftm.sc().write(|w| w.clks().none());
@@ -249,7 +697,7 @@ macro_rules! ftm_pwm_impl {
 
                 // All channels start disabled (CnSC = 0 from reset)
                 $Channels {
-                    $($ch_name: PwmChannel { mod_val, _ftm: PhantomData },)+
+                    $($ch_name2: FtmChannel { _ftm: PhantomData },)+
                 }
             }
         }
@@ -257,22 +705,28 @@ macro_rules! ftm_pwm_impl {
 }
 
 // Both variants have FTM0 (8 channels) and FTM1 (2 channels)
-ftm_pwm_impl!(pac::Ftm0, Ftm0, Ftm0Channels {
-    ch0:0, ch1:1, ch2:2, ch3:3, ch4:4, ch5:5, ch6:6, ch7:7
-}, scgc6, ftm0);
+ftm_impl!(pac::Ftm0, Ftm0,
+    Ftm0Parts { ch0:0, ch1:1, ch2:2, ch3:3, ch4:4, ch5:5, ch6:6, ch7:7 },
+    Ftm0Channels { ch0:0, ch1:1, ch2:2, ch3:3, ch4:4, ch5:5, ch6:6, ch7:7 },
+    scgc6, ftm0
+);
 
-ftm_pwm_impl!(pac::Ftm1, Ftm1, Ftm1Channels {
-    ch0:0, ch1:1
-}, scgc6, ftm1);
+ftm_impl!(pac::Ftm1, Ftm1,
+    Ftm1Parts { ch0:0, ch1:1 },
+    Ftm1Channels { ch0:0, ch1:1 },
+    scgc6, ftm1
+);
 
 // Only mk20d7 has FTM2 (2 channels)
 #[cfg(feature = "mk20d7")]
-ftm_pwm_impl!(pac::Ftm2, Ftm2, Ftm2Channels {
-    ch0:0, ch1:1
-}, scgc3, ftm2);
+ftm_impl!(pac::Ftm2, Ftm2,
+    Ftm2Parts { ch0:0, ch1:1 },
+    Ftm2Channels { ch0:0, ch1:1 },
+    scgc3, ftm2
+);
 
 // =====================================================================
-// Input Capture
+// Channel Mode Enums
 // =====================================================================
 
 /// Edge detection mode for input capture.
@@ -287,127 +741,8 @@ pub enum CaptureEdge {
     Both,
 }
 
-/// Input capture channel.
-///
-/// Captures the FTM counter value when the configured edge is detected
-/// on the channel input. Pin MUX must be configured separately.
-pub struct InputCapture<FTM, const CH: u8> {
-    _ftm: PhantomData<FTM>,
-}
-
-impl<FTM: sealed::FtmInstance, const CH: u8> InputCapture<FTM, CH> {
-    /// Configure a channel for input capture mode.
-    ///
-    /// The FTM must already be initialized (clock enabled, counter running).
-    /// Typically call this after `FtmExt::pwm()` or after manually configuring
-    /// the FTM counter via direct register access.
-    ///
-    /// # Arguments
-    /// * `edge` — Which edges trigger a capture.
-    /// * `clocks` — Clocks token (for clock gating).
-    /// * `sim` — SIM peripheral (for clock gating).
-    pub fn new(edge: CaptureEdge, clocks: &Clocks, sim: &pac::Sim) -> Self {
-        let _ = clocks;
-        FTM::enable_clock(sim);
-        let ftm = ftm_regs::<FTM>();
-
-        // Disable write protection
-        ftm.mode().modify(|_, w| w.wpdis()._1());
-
-        // Configure channel for input capture: MSB:MSA = 00
-        ftm.csc(CH as usize).write(|w| {
-            match edge {
-                CaptureEdge::Rising => w.elsa().set_bit(),
-                CaptureEdge::Falling => w.elsb().set_bit(),
-                CaptureEdge::Both => w.elsa().set_bit().elsb().set_bit(),
-            }
-        });
-
-        // Ensure counter is running (system clock, if not already set)
-        if ftm.sc().read().clks().is_none() {
-            ftm.sc().modify(|_, w| w.clks().system());
-        }
-
-        InputCapture { _ftm: PhantomData }
-    }
-
-    /// Read the last captured value if the channel flag is set.
-    ///
-    /// Returns `Some(value)` and clears the flag, or `None` if no capture
-    /// has occurred since the last read.
-    pub fn capture(&self) -> Option<u16> {
-        let ftm = ftm_regs::<FTM>();
-        if ftm.csc(CH as usize).read().chf().is_1() {
-            let val = ftm.cv(CH as usize).read().val().bits();
-            // Clear CHF by reading CnSC then writing 0 to CHF
-            // (CHF is cleared by reading CnSC when CHF is set, then writing 0)
-            ftm.csc(CH as usize).modify(|_, w| w);
-            Some(val)
-        } else {
-            None
-        }
-    }
-
-    /// Non-blocking poll for a capture event.
-    pub fn wait(&mut self) -> nb::Result<u16, Infallible> {
-        match self.capture() {
-            Some(val) => Ok(val),
-            None => Err(nb::Error::WouldBlock),
-        }
-    }
-
-    /// Enable the channel interrupt (CHIE).
-    pub fn enable_interrupt(&mut self) {
-        let ftm = ftm_regs::<FTM>();
-        ftm.csc(CH as usize).modify(|_, w| w.chie().set_bit());
-    }
-
-    /// Disable the channel interrupt (CHIE).
-    pub fn disable_interrupt(&mut self) {
-        let ftm = ftm_regs::<FTM>();
-        ftm.csc(CH as usize).modify(|_, w| w.chie().clear_bit());
-    }
-
-    /// Set the input filter value for this channel (0-15).
-    ///
-    /// Only channels 0-3 have hardware filters. Values for channels 4-7
-    /// are ignored.
-    pub fn set_filter(&mut self, value: u8) {
-        let ftm = ftm_regs::<FTM>();
-        let value = value & 0x0F;
-        match CH {
-            // SAFETY: chNfval are 4-bit fields; value is masked to 0x0F above.
-            0 => { ftm.filter().modify(|_, w| unsafe { w.ch0fval().bits(value) }); },
-            1 => { ftm.filter().modify(|_, w| unsafe { w.ch1fval().bits(value) }); },
-            2 => { ftm.filter().modify(|_, w| unsafe { w.ch2fval().bits(value) }); },
-            3 => { ftm.filter().modify(|_, w| unsafe { w.ch3fval().bits(value) }); },
-            _ => {} // Channels 4-7 have no filter
-        }
-    }
-
-    /// Clear the channel flag (CHF).
-    pub fn clear_flag(&self) {
-        let ftm = ftm_regs::<FTM>();
-        ftm.csc(CH as usize).modify(|_, w| w);
-    }
-
-    /// Enable DMA requests on channel capture.
-    ///
-    /// Both CnSC.DMA and CnSC.CHIE must be set for DMA triggering.
-    pub fn enable_dma(&mut self) {
-        let ftm = ftm_regs::<FTM>();
-        ftm.csc(CH as usize).modify(|_, w| w.dma()._1().chie()._1());
-    }
-
-    /// Disable DMA requests on channel capture.
-    pub fn disable_dma(&mut self) {
-        let ftm = ftm_regs::<FTM>();
-        ftm.csc(CH as usize).modify(|_, w| w.dma()._0().chie()._0());
-    }
-}
-
 // =====================================================================
-// Output Compare
+// Output Compare enums
 // =====================================================================
 
 /// Action to perform when the counter matches the compare value.
@@ -420,119 +755,6 @@ pub enum CompareAction {
     Clear,
     /// Set the channel output on match (drive high).
     Set,
-}
-
-/// Output compare channel.
-///
-/// Performs an action on the channel output when the FTM counter matches
-/// the compare value. Pin MUX must be configured separately.
-pub struct OutputCompare<FTM, const CH: u8> {
-    _ftm: PhantomData<FTM>,
-}
-
-impl<FTM: sealed::FtmInstance, const CH: u8> OutputCompare<FTM, CH> {
-    /// Configure a channel for output compare mode.
-    ///
-    /// The FTM must already be initialized (clock enabled, counter running).
-    ///
-    /// # Arguments
-    /// * `action` — What to do when counter matches CnV.
-    /// * `compare` — Initial compare value.
-    /// * `clocks` — Clocks token.
-    /// * `sim` — SIM peripheral.
-    pub fn new(
-        action: CompareAction,
-        compare: u16,
-        clocks: &Clocks,
-        sim: &pac::Sim,
-    ) -> Self {
-        let _ = clocks;
-        FTM::enable_clock(sim);
-        let ftm = ftm_regs::<FTM>();
-
-        // Disable write protection
-        ftm.mode().modify(|_, w| w.wpdis()._1());
-
-        // SAFETY: val is a 16-bit field; compare is u16.
-        ftm.cv(CH as usize).write(|w| unsafe { w.val().bits(compare) });
-
-        // Configure channel for output compare: MSB=0, MSA=1
-        ftm.csc(CH as usize).write(|w| {
-            let w = w.msa().set_bit();
-            match action {
-                CompareAction::Toggle => w.elsa().set_bit(),
-                CompareAction::Clear => w.elsb().set_bit(),
-                CompareAction::Set => w.elsa().set_bit().elsb().set_bit(),
-            }
-        });
-
-        // Ensure counter is running
-        if ftm.sc().read().clks().is_none() {
-            ftm.sc().modify(|_, w| w.clks().system());
-        }
-
-        OutputCompare { _ftm: PhantomData }
-    }
-
-    /// Set the compare value (CnV).
-    pub fn set_compare(&mut self, value: u16) {
-        let ftm = ftm_regs::<FTM>();
-        // SAFETY: val is a 16-bit field; value is u16.
-        ftm.cv(CH as usize).write(|w| unsafe { w.val().bits(value) });
-    }
-
-    /// Change the compare action.
-    pub fn set_action(&mut self, action: CompareAction) {
-        let ftm = ftm_regs::<FTM>();
-        ftm.csc(CH as usize).modify(|r, w| {
-            // Preserve CHIE bit
-            let w = if r.chie().is_1() { w.chie().set_bit() } else { w };
-            let w = w.msa().set_bit();
-            match action {
-                CompareAction::Toggle => w.elsa().set_bit(),
-                CompareAction::Clear => w.elsb().set_bit(),
-                CompareAction::Set => w.elsa().set_bit().elsb().set_bit(),
-            }
-        });
-    }
-
-    /// Enable the channel interrupt (CHIE).
-    pub fn enable_interrupt(&mut self) {
-        let ftm = ftm_regs::<FTM>();
-        ftm.csc(CH as usize).modify(|_, w| w.chie().set_bit());
-    }
-
-    /// Disable the channel interrupt (CHIE).
-    pub fn disable_interrupt(&mut self) {
-        let ftm = ftm_regs::<FTM>();
-        ftm.csc(CH as usize).modify(|_, w| w.chie().clear_bit());
-    }
-
-    /// Check if the channel flag is set (match occurred).
-    pub fn has_matched(&self) -> bool {
-        let ftm = ftm_regs::<FTM>();
-        ftm.csc(CH as usize).read().chf().is_1()
-    }
-
-    /// Clear the channel flag (CHF).
-    pub fn clear_flag(&self) {
-        let ftm = ftm_regs::<FTM>();
-        ftm.csc(CH as usize).modify(|_, w| w);
-    }
-
-    /// Enable DMA requests on channel match.
-    ///
-    /// Both CnSC.DMA and CnSC.CHIE must be set for DMA triggering.
-    pub fn enable_dma(&mut self) {
-        let ftm = ftm_regs::<FTM>();
-        ftm.csc(CH as usize).modify(|_, w| w.dma()._1().chie()._1());
-    }
-
-    /// Disable DMA requests on channel match.
-    pub fn disable_dma(&mut self) {
-        let ftm = ftm_regs::<FTM>();
-        ftm.csc(CH as usize).modify(|_, w| w.dma()._0().chie()._0());
-    }
 }
 
 // =====================================================================

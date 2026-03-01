@@ -93,7 +93,7 @@ pub trait LptmrExt {
 impl LptmrExt for pac::Lptmr0 {
     fn lptmr(self, sim: &pac::Sim) -> Lptmr {
         // Enable LPTMR clock gate (SIM SCGC5)
-        sim.scgc5().modify(|_, w| w.lptimer()._1());
+        sim.scgc5().modify(|_, w| w.lptimer().enabled());
 
         let lptmr = Lptmr::regs();
 

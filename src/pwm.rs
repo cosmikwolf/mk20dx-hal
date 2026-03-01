@@ -223,7 +223,7 @@ impl sealed::FtmInstance for Ftm0 {
         pac::Ftm0::PTR
     }
     fn enable_clock(sim: &pac::Sim) {
-        sim.scgc6().modify(|_, w| w.ftm0()._1());
+        sim.scgc6().modify(|_, w| w.ftm0().enabled());
     }
 }
 
@@ -233,7 +233,7 @@ impl sealed::FtmInstance for Ftm1 {
         pac::Ftm1::PTR as *const pac::ftm0::RegisterBlock
     }
     fn enable_clock(sim: &pac::Sim) {
-        sim.scgc6().modify(|_, w| w.ftm1()._1());
+        sim.scgc6().modify(|_, w| w.ftm1().enabled());
     }
 }
 
@@ -244,7 +244,7 @@ impl sealed::FtmInstance for Ftm2 {
         pac::Ftm2::PTR as *const pac::ftm0::RegisterBlock
     }
     fn enable_clock(sim: &pac::Sim) {
-        sim.scgc3().modify(|_, w| w.ftm2()._1());
+        sim.scgc3().modify(|_, w| w.ftm2().enabled());
     }
 }
 
@@ -1484,7 +1484,7 @@ macro_rules! ftm_impl {
                 let _ = clocks;
 
                 // Enable clock gate
-                sim.$scgc_reg().modify(|_, w| w.$scgc_field()._1());
+                sim.$scgc_reg().modify(|_, w| w.$scgc_field().enabled());
 
                 let ftm = ftm_regs::<$Instance>();
 
@@ -1514,7 +1514,7 @@ macro_rules! ftm_impl {
                 let (ps_idx, mod_val) = calc_prescaler(bus_clk, frequency.raw());
 
                 // Enable clock gate
-                sim.$scgc_reg().modify(|_, w| w.$scgc_field()._1());
+                sim.$scgc_reg().modify(|_, w| w.$scgc_field().enabled());
 
                 let ftm = ftm_regs::<$Instance>();
 

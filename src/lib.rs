@@ -13,6 +13,25 @@ pub use mk20d5 as pac;
 #[cfg(feature = "mk20d7")]
 pub use mk20d7 as pac;
 
+/// Interrupt enum re-export for use with `#[cortex_m_rt::interrupt]`.
+///
+/// svd2rust 0.37 places the `Interrupt` enum at the PAC crate root
+/// without a `pub mod interrupt` wrapper. The `#[interrupt]` macro
+/// expects `interrupt::VARIANT` to resolve, so this module bridges
+/// that gap.
+///
+/// ```ignore
+/// use mk20dx_hal::interrupt;
+///
+/// #[cortex_m_rt::interrupt]
+/// fn PIT0() {
+///     mk20dx_hal::timer::on_pit0_interrupt();
+/// }
+/// ```
+pub mod interrupt {
+    pub use crate::pac::Interrupt::*;
+}
+
 pub mod adc;
 pub mod clocks;
 pub mod cmp;

@@ -68,7 +68,7 @@ impl sealed::I2cInstance for I2c0 {
         pac::I2c0::PTR
     }
     fn enable_clock(sim: &pac::Sim) {
-        sim.scgc4().modify(|_, w| w.i2c0()._1());
+        sim.scgc4().modify(|_, w| w.i2c0().enabled());
     }
     unsafe fn steal_pac() -> pac::I2c0 {
         pac::I2c0::steal()
@@ -88,7 +88,7 @@ impl sealed::I2cInstance for I2c1 {
         pac::I2c1::PTR as *const pac::i2c0::RegisterBlock
     }
     fn enable_clock(sim: &pac::Sim) {
-        sim.scgc4().modify(|_, w| w.i2c1()._1());
+        sim.scgc4().modify(|_, w| w.i2c1().enabled());
     }
     unsafe fn steal_pac() -> pac::I2c1 {
         pac::I2c1::steal()

@@ -480,7 +480,7 @@ macro_rules! gpio_port_impl {
             type Gpio = $GPIO;
 
             fn split(self, _gpio: $GPIO, sim: &pac::Sim) -> $PortPins {
-                sim.scgc5().modify(|_, w| w.$scgc_field()._1());
+                sim.scgc5().modify(|_, w| w.$scgc_field().enabled());
 
                 $PortPins {
                     $(

@@ -327,7 +327,7 @@ macro_rules! adc_impl {
             type Instance = $Instance;
 
             fn adc(self, _clocks: &Clocks, sim: &pac::Sim) -> Adc<$Instance> {
-                sim.$scgc_reg().modify(|_, w| w.$scgc_field()._1());
+                sim.$scgc_reg().modify(|_, w| w.$scgc_field().enabled());
                 Adc::<$Instance>::init()
             }
         }

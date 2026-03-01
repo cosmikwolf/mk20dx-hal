@@ -50,7 +50,7 @@ pub trait RtcExt {
 impl RtcExt for pac::Rtc {
     fn rtc(self, sim: &pac::Sim) -> Rtc {
         // Enable RTC clock gate (SIM SCGC6)
-        sim.scgc6().modify(|_, w| w.rtc()._1());
+        sim.scgc6().modify(|_, w| w.rtc().enabled());
 
         let rtc = unsafe { &*pac::Rtc::PTR };
 

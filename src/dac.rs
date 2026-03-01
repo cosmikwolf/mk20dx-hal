@@ -41,7 +41,7 @@ pub trait DacExt {
 impl DacExt for pac::Dac0 {
     fn dac(self, sim: &pac::Sim) -> Dac {
         // Enable DAC0 clock gate (SIM SCGC2)
-        sim.scgc2().modify(|_, w| w.dac0()._1());
+        sim.scgc2().modify(|_, w| w.dac0().enabled());
 
         let dac = unsafe { &*pac::Dac0::PTR };
 

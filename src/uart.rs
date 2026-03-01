@@ -123,7 +123,7 @@ impl sealed::UartInstance for Uart0 {
         pac::Uart0::PTR
     }
     fn enable_clock(sim: &pac::Sim) {
-        sim.scgc4().modify(|_, w| w.uart0()._1());
+        sim.scgc4().modify(|_, w| w.uart0().enabled());
     }
     unsafe fn steal_pac() -> pac::Uart0 {
         pac::Uart0::steal()
@@ -144,7 +144,7 @@ impl sealed::UartInstance for Uart1 {
         pac::Uart1::PTR as *const pac::uart0::RegisterBlock
     }
     fn enable_clock(sim: &pac::Sim) {
-        sim.scgc4().modify(|_, w| w.uart1()._1());
+        sim.scgc4().modify(|_, w| w.uart1().enabled());
     }
     unsafe fn steal_pac() -> pac::Uart1 {
         pac::Uart1::steal()
@@ -165,7 +165,7 @@ impl sealed::UartInstance for Uart2 {
         pac::Uart2::PTR as *const pac::uart0::RegisterBlock
     }
     fn enable_clock(sim: &pac::Sim) {
-        sim.scgc4().modify(|_, w| w.uart2()._1());
+        sim.scgc4().modify(|_, w| w.uart2().enabled());
     }
     unsafe fn steal_pac() -> pac::Uart2 {
         pac::Uart2::steal()
@@ -231,14 +231,14 @@ impl<UART: sealed::UartInstance> Serial<UART> {
         // Word length and parity
         uart.c1().write(|w| {
             let w = match config.word_length {
-                WordLength::Bits8 if config.parity != Parity::None => w.m()._1(),
-                WordLength::Bits8 => w.m()._0(),
-                WordLength::Bits9 => w.m()._1(),
+                WordLength::Bits8 if config.parity != Parity::None => w.m().data9(),
+                WordLength::Bits8 => w.m().data8(),
+                WordLength::Bits9 => w.m().data9(),
             };
             match config.parity {
-                Parity::None => w.pe()._0(),
-                Parity::Even => w.pe()._1().pt()._0(),
-                Parity::Odd => w.pe()._1().pt()._1(),
+                Parity::None => w.pe().disabled(),
+                Parity::Even => w.pe().enabled().pt().even(),
+                Parity::Odd => w.pe().enabled().pt().odd(),
             }
         });
 
@@ -249,10 +249,10 @@ impl<UART: sealed::UartInstance> Serial<UART> {
         uart.bdl().write(|w| unsafe { w.sbr().bits(sbr as u8) });
 
         // Enable FIFO (harmless on depth-1 UARTs)
-        uart.pfifo().modify(|_, w| w.txfe()._1().rxfe()._1());
+        uart.pfifo().modify(|_, w| w.txfe().enabled().rxfe().enabled());
 
         // Flush FIFOs
-        uart.cfifo().write(|w| w.txflush()._1().rxflush()._1());
+        uart.cfifo().write(|w| w.txflush().flush().rxflush().flush());
 
         // TX watermark = 0, RX watermark = 1
         // SAFETY: TWFIFO/RWFIFO are 8-bit registers accepting any u8 value.
@@ -260,7 +260,7 @@ impl<UART: sealed::UartInstance> Serial<UART> {
         uart.rwfifo().write(|w| unsafe { w.bits(1) });
 
         // Enable TX and RX
-        uart.c2().write(|w| w.te()._1().re()._1());
+        uart.c2().write(|w| w.te().enabled().re().enabled());
 
         Serial { _uart: PhantomData }
     }
@@ -307,8 +307,8 @@ impl<UART: sealed::UartInstance> Serial<UART> {
         ch.set_source(UART::dma_source_tx());
 
         // Enable DMA TX requests: C5.TDMAS=1, C2.TIE=1
-        uart.c5().modify(|_, w| w.tdmas()._1());
-        uart.c2().modify(|_, w| w.tie()._1());
+        uart.c5().modify(|_, w| w.tdmas().dma());
+        uart.c2().modify(|_, w| w.tie().enabled());
 
         ch.enable_request();
 
@@ -342,12 +342,27 @@ impl<UART: sealed::UartInstance> Serial<UART> {
         ch.set_source(UART::dma_source_rx());
 
         // Enable DMA RX requests: C5.RDMAS=1, C2.RIE=1
-        uart.c5().modify(|_, w| w.rdmas()._1());
-        uart.c2().modify(|_, w| w.rie()._1());
+        uart.c5().modify(|_, w| w.rdmas().dma());
+        uart.c2().modify(|_, w| w.rie().enabled());
 
         ch.enable_request();
 
         crate::dma::DmaTransfer { channel: ch }
+    }
+
+    /// Disable UART DMA requests (clears C5.TDMAS/RDMAS and C2.TIE/RIE).
+    /// Call after DMA transfer completes to prevent spurious activations.
+    pub fn disable_dma_requests(&mut self) {
+        let uart = regs::<UART>();
+        uart.c5().modify(|_, w| w.tdmas().interrupt().rdmas().interrupt());
+        uart.c2().modify(|_, w| w.tie().disabled().rie().disabled());
+    }
+
+    /// Wait for transmitter to finish shifting out the last byte.
+    /// Call after DMA write to ensure data is fully on the wire.
+    pub fn wait_tx_complete(&self) {
+        let uart = regs::<UART>();
+        while uart.s1().read().tc().is_active() {}
     }
 
     /// Release the UART peripheral, returning the PAC type.
@@ -363,7 +378,7 @@ impl<UART: sealed::UartInstance> Serial<UART> {
     pub unsafe fn release(self) -> UART::Pac {
         let uart = regs::<UART>();
         // Disable TX and RX
-        uart.c2().write(|w| w.te()._0().re()._0());
+        uart.c2().write(|w| w.te().disabled().re().disabled());
         UART::steal_pac()
     }
 }
@@ -375,13 +390,13 @@ fn nb_read<UART: sealed::UartInstance>() -> nb::Result<u8, Error> {
     let s1 = uart.s1().read();
 
     // Check error flags (reading S1 then D clears them)
-    if s1.or().is_1() || s1.fe().is_1() || s1.nf().is_1() || s1.pf().is_1() {
+    if s1.or().is_overrun() || s1.fe().is_error() || s1.nf().is_noise() || s1.pf().is_error() {
         let _ = uart.d().read();
-        let err = if s1.or().is_1() {
+        let err = if s1.or().is_overrun() {
             Error::Overrun
-        } else if s1.fe().is_1() {
+        } else if s1.fe().is_error() {
             Error::Framing
-        } else if s1.nf().is_1() {
+        } else if s1.nf().is_noise() {
             Error::Noise
         } else {
             Error::Parity
@@ -389,7 +404,7 @@ fn nb_read<UART: sealed::UartInstance>() -> nb::Result<u8, Error> {
         return Err(nb::Error::Other(err));
     }
 
-    if s1.rdrf().is_0() {
+    if s1.rdrf().is_empty() {
         return Err(nb::Error::WouldBlock);
     }
 
@@ -398,7 +413,7 @@ fn nb_read<UART: sealed::UartInstance>() -> nb::Result<u8, Error> {
 
 fn nb_write<UART: sealed::UartInstance>(byte: u8) -> nb::Result<(), Error> {
     let uart = regs::<UART>();
-    if uart.s1().read().tdre().is_0() {
+    if uart.s1().read().tdre().is_full() {
         return Err(nb::Error::WouldBlock);
     }
     // SAFETY: D is an 8-bit data register; byte is u8.
@@ -408,7 +423,7 @@ fn nb_write<UART: sealed::UartInstance>(byte: u8) -> nb::Result<(), Error> {
 
 fn nb_flush<UART: sealed::UartInstance>() -> nb::Result<(), Error> {
     let uart = regs::<UART>();
-    if uart.s1().read().tc().is_0() {
+    if uart.s1().read().tc().is_active() {
         return Err(nb::Error::WouldBlock);
     }
     Ok(())
@@ -648,19 +663,19 @@ mod async_impl {
         let wakers = wakers_for(UART::ptr());
 
         // Wake RX task if data available or error
-        if s1.rdrf().is_1() || s1.or().is_1() || s1.fe().is_1() || s1.nf().is_1() || s1.pf().is_1()
+        if s1.rdrf().is_full() || s1.or().is_overrun() || s1.fe().is_error() || s1.nf().is_noise() || s1.pf().is_error()
         {
             wakers.rx.wake();
         }
         // Wake TX task if transmit buffer empty
-        if s1.tdre().is_1() {
+        if s1.tdre().is_empty() {
             // Disable TIE to prevent repeated firing until re-enabled
-            uart.c2().modify(|_, w| w.tie()._0());
+            uart.c2().modify(|_, w| w.tie().disabled());
             wakers.tx.wake();
         }
         // Wake TX task if transmit complete (for flush)
-        if s1.tc().is_1() {
-            uart.c2().modify(|_, w| w.tcie()._0());
+        if s1.tc().is_complete() {
+            uart.c2().modify(|_, w| w.tcie().disabled());
             wakers.tx.wake();
         }
     }
@@ -693,7 +708,7 @@ mod async_impl {
             let wakers = wakers_for(UART::ptr());
             let uart = regs::<UART>();
             // Enable RX interrupt
-            uart.c2().modify(|_, w| w.rie()._1());
+            uart.c2().modify(|_, w| w.rie().enabled());
             let result = core::future::poll_fn(|cx| {
                 wakers.rx.register(cx.waker());
                 match nb_read::<UART>() {
@@ -703,7 +718,7 @@ mod async_impl {
                 }
             })
             .await;
-            uart.c2().modify(|_, w| w.rie()._0());
+            uart.c2().modify(|_, w| w.rie().disabled());
             match result {
                 Ok(byte) => {
                     buf[0] = byte;
@@ -740,7 +755,7 @@ mod async_impl {
                 match nb_write::<UART>(buf[0]) {
                     Ok(()) => core::task::Poll::Ready(Ok(())),
                     Err(nb::Error::WouldBlock) => {
-                        uart.c2().modify(|_, w| w.tie()._1());
+                        uart.c2().modify(|_, w| w.tie().enabled());
                         core::task::Poll::Pending
                     }
                     Err(nb::Error::Other(e)) => core::task::Poll::Ready(Err(e)),
@@ -766,7 +781,7 @@ mod async_impl {
                 match nb_flush::<UART>() {
                     Ok(()) => core::task::Poll::Ready(Ok(())),
                     Err(nb::Error::WouldBlock) => {
-                        uart.c2().modify(|_, w| w.tcie()._1());
+                        uart.c2().modify(|_, w| w.tcie().enabled());
                         core::task::Poll::Pending
                     }
                     Err(nb::Error::Other(e)) => core::task::Poll::Ready(Err(e)),
@@ -785,7 +800,7 @@ mod async_impl {
             }
             let wakers = wakers_for(UART::ptr());
             let uart = regs::<UART>();
-            uart.c2().modify(|_, w| w.rie()._1());
+            uart.c2().modify(|_, w| w.rie().enabled());
             let result = core::future::poll_fn(|cx| {
                 wakers.rx.register(cx.waker());
                 match nb_read::<UART>() {
@@ -795,7 +810,7 @@ mod async_impl {
                 }
             })
             .await;
-            uart.c2().modify(|_, w| w.rie()._0());
+            uart.c2().modify(|_, w| w.rie().disabled());
             match result {
                 Ok(byte) => {
                     buf[0] = byte;
@@ -828,7 +843,7 @@ mod async_impl {
                 match nb_write::<UART>(buf[0]) {
                     Ok(()) => core::task::Poll::Ready(Ok(())),
                     Err(nb::Error::WouldBlock) => {
-                        uart.c2().modify(|_, w| w.tie()._1());
+                        uart.c2().modify(|_, w| w.tie().enabled());
                         core::task::Poll::Pending
                     }
                     Err(nb::Error::Other(e)) => core::task::Poll::Ready(Err(e)),
@@ -853,7 +868,7 @@ mod async_impl {
                 match nb_flush::<UART>() {
                     Ok(()) => core::task::Poll::Ready(Ok(())),
                     Err(nb::Error::WouldBlock) => {
-                        uart.c2().modify(|_, w| w.tcie()._1());
+                        uart.c2().modify(|_, w| w.tcie().enabled());
                         core::task::Poll::Pending
                     }
                     Err(nb::Error::Other(e)) => core::task::Poll::Ready(Err(e)),

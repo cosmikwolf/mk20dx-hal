@@ -140,7 +140,7 @@ pub trait PitExt {
 impl PitExt for pac::Pit {
     fn split(self, sim: &pac::Sim, clocks: &Clocks) -> PitChannels {
         // Enable PIT clock gate
-        sim.scgc6().modify(|_, w| w.pit()._1());
+        sim.scgc6().modify(|_, w| w.pit().enabled());
 
         // Enable PIT module (MDIS=0) and freeze in debug mode (FRZ=1)
         let pit = regs();

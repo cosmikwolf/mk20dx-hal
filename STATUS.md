@@ -30,10 +30,10 @@ The `mk20dx-pac` crates are mature (Phase 5 complete, Phase 6 publishing in prog
 
 | PAC Crate | Compiles | Correctness Patches | Ergonomics Patches | Validation |
 |-----------|----------|--------------------|--------------------|------------|
-| `mk20d5` | OK (0 errors) | 2 applied (SIM, FMC) | 9 applied (DMAMUX enums, DMA TCD clusters, 6 common semantic enum patches, 1 variant-specific) | 44 peripherals verified, 0 address mismatches |
-| `mk20d7` | OK (0 errors) | 0 needed (clean SVD) | 10 applied (DMAMUX enums, DMA TCD clusters, 6 common semantic enum patches, 2 variant-specific) | 48 peripherals verified, 0 address mismatches |
+| `mk20d5` | OK (0 errors) | 2 applied (SIM, FMC) | 15 applied (DMAMUX enums, DMA TCD clusters, 12 common semantic enum patches, 1 variant-specific) | 44 peripherals verified, 0 address mismatches |
+| `mk20d7` | OK (0 errors) | 0 needed (clean SVD) | 16 applied (DMAMUX enums, DMA TCD clusters, 12 common semantic enum patches, 5 variant-specific) | 48 peripherals verified, 0 address mismatches |
 
-Semantic enum patches now provide named enums across PORT MUX, FTM, ADC, MCG, SIM, and DMA ATTR fields — the HAL can use these directly instead of raw bit patterns.
+Semantic enum patches now provide named enums across PORT MUX, FTM, ADC, MCG, SIM SOPT2, SIM SCGC, DMA ATTR, SPI, and UART fields — the HAL uses these directly instead of raw bit patterns.
 
 PAC is dual-licensed MIT/Apache-2.0, has README.md, and Cargo.toml metadata is ready for publishing.
 
@@ -127,6 +127,8 @@ Reference: K20 ref manual chapters 11 (PORT), 43 (GPIO)
 - [x] `embedded_io::Write` with `flush()`
 - [x] `UartExt` extension trait on `pac::Uart0`/`Uart1`/`Uart2`
 - [x] Split into `Tx<UART>` and `Rx<UART>` halves
+- [x] DMA helpers: `disable_dma_requests()`, `wait_tx_complete()`
+- [x] Semantic PAC enum names (UART C1-C5, S1, S2, PFIFO, CFIFO, SFIFO)
 - [ ] Hardware validation: tests in `mk20dx-testsuite/tests/uart_loopback.rs` (5 tests, requires PTD3→PTD2 wire)
 
 Reference: K20 ref manual chapter 35 (UART)

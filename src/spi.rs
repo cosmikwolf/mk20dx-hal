@@ -469,7 +469,7 @@ macro_rules! spi_impl {
                 clocks: &Clocks,
                 sim: &pac::Sim,
             ) -> Spi<$Instance> {
-                sim.scgc6().modify(|_, w| w.$scgc_field()._1());
+                sim.scgc6().modify(|_, w| w.$scgc_field().enabled());
                 Spi::<$Instance>::init(config, clocks.bus_clk().raw())
             }
         }

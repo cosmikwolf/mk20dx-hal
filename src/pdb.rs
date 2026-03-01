@@ -344,7 +344,7 @@ pub trait PdbExt: Sized {
 impl PdbExt for pac::Pdb0 {
     fn constrain(self, sim: &pac::Sim) -> Pdb {
         // Enable PDB clock gate
-        sim.scgc6().modify(|_, w| w.pdb()._1());
+        sim.scgc6().modify(|_, w| w.pdb().enabled());
         Pdb { _private: () }
     }
 }

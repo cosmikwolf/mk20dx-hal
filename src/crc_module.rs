@@ -104,7 +104,7 @@ pub trait CrcExt {
 impl CrcExt for pac::Crc {
     fn crc_engine(self, sim: &pac::Sim) -> Crc {
         // Enable CRC clock gate (SIM SCGC6)
-        sim.scgc6().modify(|_, w| w.crc()._1());
+        sim.scgc6().modify(|_, w| w.crc().enabled());
 
         Crc { _private: () }
     }

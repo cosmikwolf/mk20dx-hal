@@ -293,7 +293,7 @@ macro_rules! cmp_impl {
 
             fn cmp(self, plus: Input, minus: Input, sim: &pac::Sim) -> Cmp<$Instance> {
                 // Enable CMP clock gate (shared for all instances)
-                sim.scgc4().modify(|_, w| w.cmp()._1());
+                sim.scgc4().modify(|_, w| w.cmp().enabled());
                 Cmp::<$Instance>::init(plus, minus)
             }
         }

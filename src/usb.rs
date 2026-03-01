@@ -409,7 +409,7 @@ impl UsbBusTrait for UsbBus {
         }
 
         // Enable USB clock gate
-        sim.scgc4().modify(|_, w| w.usbotg()._1());
+        sim.scgc4().modify(|_, w| w.usbotg().enabled());
 
         // --- Initialize USB peripheral ---
 
@@ -862,7 +862,7 @@ impl UsbBusExt for pac::Usb0 {
         }
 
         // Enable USB clock gate
-        sim.scgc4().modify(|_, w| w.usbotg()._1());
+        sim.scgc4().modify(|_, w| w.usbotg().enabled());
 
         UsbBus::new()
     }

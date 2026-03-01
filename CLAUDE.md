@@ -230,6 +230,11 @@ The PAC's ergonomics patches provide named enums the HAL should use directly:
 - **ADC CFG1**: `Mode8Bit`, `Mode12Bit`, `Mode10Bit`, `Mode16Bit`; clock source and sample time enums
 - **MCG C1/C2/C6**: Clock source, FLL divider, oscillator range, PLL VDIV enums
 - **SIM SOPT2**: PLL/FLL select, clock output select enums
+- **SIM SCGC4/5/6/7**: `Enabled`/`Disabled` clock gate enums for all peripheral gates
+- **SPI MCR/CTAR/SR/PUSHR/RSER**: Module config, baud rate, status, push, DMA request enums
+- **UART C1-C5**: Parity, word length, TX/RX enable, DMA select, interrupt enable enums
+- **UART S1/S2**: Status flag enums (error, data ready, transmit complete, etc.)
+- **UART PFIFO/CFIFO/SFIFO**: FIFO enable, flush, status enums
 - **DMA TCD ATTR**: Transfer size enums (`Bits8`, `Bits16`, `Bits32`, `Burst16`)
 - **DMAMUX CHCFG SOURCE**: Peripheral source enums (`Disabled`, `Uart0rx`, `Spi0rx`, `Adc0`, `AlwaysOn0`, etc.)
 

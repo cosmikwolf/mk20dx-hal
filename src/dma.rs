@@ -938,9 +938,9 @@ pub trait DmaExt: Sized {
 impl DmaExt for pac::Dma {
     fn split(self, _dmamux: pac::Dmamux, sim: &pac::Sim) -> DmaChannels {
         // Enable DMAMUX clock gate
-        sim.scgc6().modify(|_, w| w.dmamux()._1());
+        sim.scgc6().modify(|_, w| w.dmamux().enabled());
         // Enable DMA clock gate
-        sim.scgc7().modify(|_, w| w.dma()._1());
+        sim.scgc7().modify(|_, w| w.dma().enabled());
 
         let dma = dma_regs();
         let dmamux = dmamux_regs();

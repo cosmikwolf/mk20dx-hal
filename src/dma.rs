@@ -111,6 +111,12 @@ pub struct TransferConfig {
     pub source_last_adjust: i32,
     /// Signed adjustment to destination address after major loop completion.
     pub dest_last_adjust: i32,
+    /// Destination address modulo (0 = disabled, 1-31 = wrap at 2^N bytes).
+    /// Enables circular buffer behavior for the destination address.
+    pub dest_modulo: u8,
+    /// If true (default), auto-disable hardware request on major loop complete.
+    /// Set to false for continuous/circular transfers.
+    pub auto_disable: bool,
 }
 
 // ----- DMA Source -----
@@ -309,18 +315,20 @@ impl ScatterGatherTcd {
     /// Sets ESG=1 in CSR for scatter-gather mode. The caller must set
     /// `dlastsga` to point to the next TCD in the chain.
     pub fn from_config(config: &TransferConfig) -> Self {
+        let attr = Self::attr_from_sizes(config.source_size, config.dest_size)
+            | ((config.dest_modulo as u16 & 0x1F) << 3);
         Self {
             saddr: config.source_addr,
             soff: config.source_offset as u16,
-            attr: Self::attr_from_sizes(config.source_size, config.dest_size),
+            attr,
             nbytes: config.minor_loop_bytes,
             slast: config.source_last_adjust as u32,
             daddr: config.dest_addr,
             doff: config.dest_offset as u16,
             citer: config.major_loop_count,
             dlastsga: 0,
-            // ESG=1 (bit 4)
-            csr: 1 << 4,
+            // ESG=1 (bit 4), DREQ based on auto_disable
+            csr: (1 << 4) | if config.auto_disable { 1 << 3 } else { 0 },
             biter: config.major_loop_count,
         }
     }
@@ -421,9 +429,9 @@ impl<const CH: u8> DmaChannel<CH> {
         // Source offset (signed i16, bit-pattern preserved by cast to u16)
         tcd.soff().write(|w| unsafe { w.soff().bits(config.source_offset as u16) });
 
-        // Transfer attributes: SSIZE/DSIZE via safe enums, SMOD/DMOD = 0
+        // Transfer attributes: SSIZE/DSIZE via safe enums, SMOD=0, DMOD from config
         tcd.attr().write(|w| {
-            let w = unsafe { w.smod().bits(0).dmod().bits(0) };
+            let w = unsafe { w.smod().bits(0).dmod().bits(config.dest_modulo) };
             let w = match config.source_size {
                 TransferSize::Bits8 => w.ssize().bits8(),
                 TransferSize::Bits16 => w.ssize().bits16(),
@@ -459,8 +467,12 @@ impl<const CH: u8> DmaChannel<CH> {
         // Destination last address adjustment (signed i32 → u32)
         tcd.dlastsga().write(|w| unsafe { w.dlastsga().bits(config.dest_last_adjust as u32) });
 
-        // Control/status: auto-disable request on major complete
-        tcd.csr().write(|w| w.dreq()._1());
+        // Control/status: optionally auto-disable request on major complete
+        if config.auto_disable {
+            tcd.csr().write(|w| w.dreq()._1());
+        } else {
+            tcd.csr().write(|w| w.dreq()._0());
+        }
 
         // Beginning iteration count (must equal CITER when loading a new TCD)
         tcd.biter_elinkno().write(|w| {
@@ -497,7 +509,7 @@ impl<const CH: u8> DmaChannel<CH> {
         tcd.saddr().write(|w| unsafe { w.saddr().bits(config.source_addr) });
         tcd.soff().write(|w| unsafe { w.soff().bits(config.source_offset as u16) });
         tcd.attr().write(|w| {
-            let w = unsafe { w.smod().bits(0).dmod().bits(0) };
+            let w = unsafe { w.smod().bits(0).dmod().bits(config.dest_modulo) };
             let w = match config.source_size {
                 TransferSize::Bits8 => w.ssize().bits8(),
                 TransferSize::Bits16 => w.ssize().bits16(),
@@ -552,15 +564,18 @@ impl<const CH: u8> DmaChannel<CH> {
             });
         }
 
-        // CSR: DREQ + optional major loop linking
+        // CSR: optionally DREQ + optional major loop linking
+        let dreq = config.auto_disable;
         if major_link {
             tcd.csr().write(|w| {
-                unsafe { w.majorlinkch().bits(major_ch) }
-                    .dreq()._1()
-                    .majorelink()._1()
+                let w = unsafe { w.majorlinkch().bits(major_ch) }
+                    .majorelink()._1();
+                if dreq { w.dreq()._1() } else { w.dreq()._0() }
             });
-        } else {
+        } else if dreq {
             tcd.csr().write(|w| w.dreq()._1());
+        } else {
+            tcd.csr().write(|w| w.dreq()._0());
         }
     }
 
@@ -710,6 +725,17 @@ impl<const CH: u8> DmaChannel<CH> {
         dma_regs().ceei().write(|w| unsafe { w.ceei().bits(CH) });
     }
 
+    // --- TCD Readback ---
+
+    /// Read the current destination address from the TCD.
+    ///
+    /// For circular DMA transfers (dest_modulo > 0), this returns the
+    /// address where the DMA engine will write next, which advances
+    /// independently of the CPU.
+    pub fn current_dest_addr(&self) -> u32 {
+        dma_regs().tcd(CH as usize).daddr().read().daddr().bits()
+    }
+
     // --- Convenience Methods ---
 
     /// Configure a memory-to-memory copy of `len` bytes.
@@ -743,6 +769,8 @@ impl<const CH: u8> DmaChannel<CH> {
             major_loop_count: 1,
             source_last_adjust: -(len as i32),
             dest_last_adjust: -(len as i32),
+            dest_modulo: 0,
+            auto_disable: true,
         });
     }
 
@@ -780,6 +808,8 @@ impl<const CH: u8> DmaChannel<CH> {
             major_loop_count: count,
             source_last_adjust: 0,
             dest_last_adjust: -(count as i32 * ts_bytes as i32),
+            dest_modulo: 0,
+            auto_disable: true,
         });
     }
 
@@ -816,6 +846,8 @@ impl<const CH: u8> DmaChannel<CH> {
             major_loop_count: count,
             source_last_adjust: -(count as i32 * ts_bytes as i32),
             dest_last_adjust: 0,
+            dest_modulo: 0,
+            auto_disable: true,
         });
     }
 }

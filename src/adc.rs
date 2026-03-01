@@ -503,6 +503,8 @@ macro_rules! adc_scan_impl {
                         major_loop_count: num_ch as u16,
                         source_last_adjust: 0,
                         dest_last_adjust: -total_bytes, // Reset buffer pointer
+                        dest_modulo: 0,
+                        auto_disable: true,
                     });
                 }
 

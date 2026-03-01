@@ -153,9 +153,13 @@ The Multipurpose Clock Generator produces the system clock from the external 16 
 3. Transition to PBE (PLL Bypassed External) — configure PLL
 4. Transition to PEE (PLL Engaged External) — switch to PLL output
 
-Target frequencies:
+Target frequencies (default):
 - MK20DX128 (Teensy 3.0): 48 MHz core, 48 MHz bus, 24 MHz flash
 - MK20DX256 (Teensy 3.1/3.2): 72 MHz core, 36 MHz bus, 24 MHz flash
+
+Overclock presets (mk20d7 only, via `freeze_at(ClockSpeed::*, ..)`):
+- `Mhz96`: 96 MHz core, 48 MHz bus, 24 MHz flash (PRDIV=3, VDIV=0)
+- `Mhz120`: 120 MHz core, 60 MHz bus, 24 MHz flash (PRDIV=3, VDIV=6)
 
 The PAC now provides semantic MCG enums for clock source selection (`c1().clks().fll()`, `c1().clks().internal()`, `c1().clks().external()`), FLL reference divider, oscillator range, and PLL VDIV — use these instead of raw bit patterns.
 
@@ -175,13 +179,17 @@ impl McgExt for pac::Mcg {
     fn constrain(self) -> Mcg { Mcg { _mcg: self } }
 }
 
-/// Wrapper that consumes the PAC MCG and provides `freeze()`.
+/// Wrapper that consumes the PAC MCG and provides `freeze()` / `freeze_at()`.
 pub struct Mcg { _mcg: pac::Mcg }
 
 impl Mcg {
-    /// Configure the clock tree and return frozen clock frequencies.
-    /// Consumes the OSC peripheral; borrows SIM (shared with other modules).
+    /// Configure the clock tree at the default speed and return frozen clock frequencies.
+    /// mk20d7: 72 MHz, mk20d5: 48 MHz. On mk20d7, delegates to freeze_at(Mhz72, ..).
     pub fn freeze(self, osc: OscPeripheral, sim: &pac::Sim) -> Clocks { ... }
+
+    /// Configure the clock tree at a specific speed preset (mk20d7 only).
+    #[cfg(feature = "mk20d7")]
+    pub fn freeze_at(self, speed: ClockSpeed, osc: OscPeripheral, sim: &pac::Sim) -> Clocks { ... }
 }
 ```
 
@@ -649,15 +657,38 @@ These tests validate peripheral drivers using only on-chip resources.
 | `test_watchdog_survives_500ms` | Busy-wait 500ms after disable | Completes without reset |
 | `test_system_functional_after_disable` | Read MCG.S register | Registers accessible |
 
-#### `tests/clocks.rs` — 6 tests | Priority: CRITICAL
+#### `tests/clocks.rs` — 5 tests | Priority: CRITICAL
 
 | Test | Description | Pass Criteria |
 |------|-------------|---------------|
-| `test_core_clk_72mhz` | `clocks.core_clk()` | == 72_000_000 Hz |
-| `test_bus_clk_36mhz` | `clocks.bus_clk()` | == 36_000_000 Hz |
-| `test_flash_clk_24mhz` | `clocks.flash_clk()` | == 24_000_000 Hz |
+| `test_core_clk_72mhz` | `clocks.core_clk()` + MCG PLL cross-check | == 72_000_000 Hz, PRDIV=7, VDIV=12 |
+| `test_bus_clk_36mhz` | `clocks.bus_clk()` + SIM OUTDIV2 | == 36_000_000 Hz, OUTDIV2=1 |
+| `test_flash_clk_24mhz` | `clocks.flash_clk()` + SIM OUTDIV4 | == 24_000_000 Hz, OUTDIV4=2 |
 | `test_pll_locked` | Read MCG.S register | LOCK0=1, PLLST=1, CLKST=0b11 |
-| `test_sim_dividers` | Read SIM.CLKDIV1 | OUTDIV1=0, OUTDIV2=1, OUTDIV4=2 |
+| `test_osc_initialized` | Read MCG.S.OSCINIT0 | == 1 |
+
+#### `tests/clocks_96mhz.rs` — 5 tests | Priority: HIGH
+
+Uses `freeze_at(ClockSpeed::Mhz96)`.
+
+| Test | Description | Pass Criteria |
+|------|-------------|---------------|
+| `test_core_clk_96mhz` | `clocks.core_clk()` + MCG PLL cross-check | == 96_000_000 Hz, PRDIV=3, VDIV=0 |
+| `test_bus_clk_48mhz` | `clocks.bus_clk()` + SIM OUTDIV2 | == 48_000_000 Hz, OUTDIV2=1 |
+| `test_flash_clk_24mhz` | `clocks.flash_clk()` + SIM OUTDIV4 | == 24_000_000 Hz, OUTDIV4=3 |
+| `test_pll_locked` | Read MCG.S register | LOCK0=1, PLLST=1, CLKST=0b11 |
+| `test_osc_initialized` | Read MCG.S.OSCINIT0 | == 1 |
+
+#### `tests/clocks_120mhz.rs` — 5 tests | Priority: HIGH
+
+Uses `freeze_at(ClockSpeed::Mhz120)`.
+
+| Test | Description | Pass Criteria |
+|------|-------------|---------------|
+| `test_core_clk_120mhz` | `clocks.core_clk()` + MCG PLL cross-check | == 120_000_000 Hz, PRDIV=3, VDIV=6 |
+| `test_bus_clk_60mhz` | `clocks.bus_clk()` + SIM OUTDIV2 | == 60_000_000 Hz, OUTDIV2=1 |
+| `test_flash_clk_24mhz` | `clocks.flash_clk()` + SIM OUTDIV4 | == 24_000_000 Hz, OUTDIV4=4 |
+| `test_pll_locked` | Read MCG.S register | LOCK0=1, PLLST=1, CLKST=0b11 |
 | `test_osc_initialized` | Read MCG.S.OSCINIT0 | == 1 |
 
 #### `tests/gpio.rs` — 8 tests | Priority: HIGH
@@ -1480,17 +1511,32 @@ Integrate DMA with SPI, UART, and ADC for high-throughput transfers without CPU 
 
 ### 18.2 DMA + SPI
 
+Two DMA write modes:
+
 ```rust
 impl Spi<SPI0> {
-    /// Perform a DMA-backed SPI transfer.
-    /// Returns a `DmaTransfer` handle that can be polled or awaited.
-    pub fn transfer_dma<'a>(
-        &'a mut self,
-        tx_buf: &'a [u8],
-        rx_buf: &'a mut [u8],
-        tx_ch: &'a mut DmaChannel<TX_CH>,
-        rx_ch: &'a mut DmaChannel<RX_CH>,
-    ) -> DmaSpiTransfer<'a>;
+    /// 8-bit DMA write — data bytes only, no per-frame command control.
+    pub fn write_dma<'a>(&'a mut self, buf: &'a [u8], ch: &'a mut DmaChannel<CH>) -> DmaTransfer<'a, CH>;
+
+    /// 32-bit DMA write to PUSHR — each u32 is a pre-packed command word
+    /// with data + PCS + CONT + EOQ fields. Use `pack_pushr()` to build.
+    pub fn write_dma_pushr<'a>(&'a mut self, buf: &'a [u32], ch: &'a mut DmaChannel<CH>) -> DmaTransfer<'a, CH>;
+}
+
+/// Build a complete PUSHR command word (const fn, module-level).
+pub const fn pack_pushr(data: u16, pcs: u8, cont: bool, eoq: bool) -> u32;
+```
+
+MCR/SR/RSER control methods for DMA workflows:
+
+```rust
+impl Spi<SPI0> {
+    pub fn flush_fifos(&mut self);           // CLR_TXF + CLR_RXF
+    pub fn set_rx_fifo(&mut self, enabled: bool);  // DIS_RXF
+    pub fn set_rooe(&mut self, enabled: bool);     // ROOE
+    pub fn clear_status(&mut self);          // Clear all W1C flags
+    pub fn disable_dma_requests(&mut self);  // Zero RSER
+    pub fn wait_tx_complete(&self);          // Block until TXCTR=0 + TCF
 }
 ```
 
@@ -1681,7 +1727,7 @@ impl Llwu {
 ### 20.5 Dependencies
 
 - LPTMR (Low-Power Timer) may be needed as a wake source — consider adding an LPTMR driver in this phase or as a separate sub-phase
-- MCG BLPI/BLPE mode transitions need to be added to the clocks module
+- MCG BLPI/BLPE mode transitions added to the clocks module. `PeeState` saves the SIM CLKDIV1 register so BLPI exit restores the correct dividers regardless of which `ClockSpeed` preset was used
 
 ### 20.6 Validation
 
@@ -1743,7 +1789,7 @@ Reference: K20 ref manual chapter 26 (CRC)
 
 Following the dominant pattern across the embedded Rust ecosystem (stm32f4xx-hal, stm32f1xx-hal, stm32h7xx-hal, nrf-hal, rp2040-hal, lpc8xx-hal, imxrt-hal), peripherals are initialized via **extension traits** on PAC types:
 
-- **`McgExt`** on `pac::Mcg` — provides `constrain()` returning an MCG builder, which has a `freeze()` method that configures clocks and returns the `Clocks` token
+- **`McgExt`** on `pac::Mcg` — provides `constrain()` returning an MCG builder, which has `freeze()` (default speed) and `freeze_at(ClockSpeed, ..)` (overclock presets, mk20d7 only) methods that configure clocks and return the `Clocks` token
 - **`GpioExt`** on port types — provides `split()` that consumes both PORT and GPIO peripherals, enables the SIM clock gate, and returns individual pin structs
 - **`WdogExt`** on `pac::Wdog` — provides `disable()` that consumes the watchdog peripheral
 
@@ -1758,7 +1804,10 @@ Example usage:
 use mk20dx_hal::prelude::*;
 let dp = pac::Peripherals::take().unwrap();
 dp.WDOG.disable();
-let clocks = dp.MCG.constrain().freeze(dp.OSC, &dp.SIM);
+let clocks = dp.MCG.constrain().freeze(dp.OSC, &dp.SIM);  // 72 MHz default
+// Or overclock (mk20d7 only):
+// use mk20dx_hal::clocks::ClockSpeed;
+// let clocks = dp.MCG.constrain().freeze_at(ClockSpeed::Mhz96, dp.OSC, &dp.SIM);
 let pins_a = dp.PORTA.split(dp.PTA, &dp.SIM);
 ```
 

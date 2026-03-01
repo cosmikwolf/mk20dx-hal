@@ -55,7 +55,7 @@ impl<const PORT: char, const N: u8, MODE> Pin<PORT, N, MODE> {
         // Set MUX to GPIO, disable pull
         port.pcr(N as usize).write(|w| {
             w.mux().gpio()
-             .pe()._0() // Pull disabled
+             .pe().disabled() // Pull disabled
         });
         Pin { _mode: PhantomData }
     }
@@ -67,8 +67,8 @@ impl<const PORT: char, const N: u8, MODE> Pin<PORT, N, MODE> {
         gpio.pddr().modify(|r, w| unsafe { w.bits(r.bits() & !(1 << N)) });
         port.pcr(N as usize).write(|w| {
             w.mux().gpio()
-             .pe()._1() // Pull enabled
-             .ps()._1() // Pull-up
+             .pe().enabled() // Pull enabled
+             .ps().pull_up() // Pull-up
         });
         Pin { _mode: PhantomData }
     }
@@ -80,8 +80,8 @@ impl<const PORT: char, const N: u8, MODE> Pin<PORT, N, MODE> {
         gpio.pddr().modify(|r, w| unsafe { w.bits(r.bits() & !(1 << N)) });
         port.pcr(N as usize).write(|w| {
             w.mux().gpio()
-             .pe()._1() // Pull enabled
-             .ps()._0() // Pull-down
+             .pe().enabled() // Pull enabled
+             .ps().pull_down() // Pull-down
         });
         Pin { _mode: PhantomData }
     }
@@ -95,7 +95,7 @@ impl<const PORT: char, const N: u8, MODE> Pin<PORT, N, MODE> {
         // Set MUX to GPIO, disable open drain
         port.pcr(N as usize).write(|w| {
             w.mux().gpio()
-             .ode()._0() // Open drain disabled
+             .ode().disabled() // Open drain disabled
         });
         Pin { _mode: PhantomData }
     }
@@ -107,7 +107,7 @@ impl<const PORT: char, const N: u8, MODE> Pin<PORT, N, MODE> {
         gpio.pddr().modify(|r, w| unsafe { w.bits(r.bits() | (1 << N)) });
         port.pcr(N as usize).write(|w| {
             w.mux().gpio()
-             .ode()._1() // Open drain enabled
+             .ode().enabled() // Open drain enabled
         });
         Pin { _mode: PhantomData }
     }

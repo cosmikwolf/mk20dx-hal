@@ -1,6 +1,6 @@
 # mk20dx-hal: Project Status
 
-**Last updated:** 2026-02-22 (Phases 16-21 complete)
+**Last updated:** 2026-02-28 (DSPI PUSHR DMA and MCR control)
 
 ---
 
@@ -66,7 +66,22 @@ PAC is dual-licensed MIT/Apache-2.0, has README.md, and Cargo.toml metadata is r
 - [x] `Clocks` token struct (core_clk, bus_clk, flash_clk frequencies)
 - [x] Feature-gated PLL math: mk20d7=72 MHz, mk20d5=48 MHz
 - [x] `McgExt` extension trait on `pac::Mcg` with `constrain()` → `Mcg` → `freeze(osc, &sim)` → `Clocks`
-- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/clocks.rs` (6 tests)
+- [x] `ClockSpeed` enum (mk20d7 only): `Mhz72`, `Mhz96`, `Mhz120` overclock presets
+- [x] `Mcg::freeze_at(speed, osc, &sim)` — parameterized clock configuration (mk20d7 only)
+- [x] `freeze()` delegates to `freeze_at(ClockSpeed::Mhz72, ..)` on mk20d7
+- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/clocks.rs` (5 tests, 72 MHz)
+- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/clocks_96mhz.rs` (5 tests, 96 MHz overclock)
+- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/clocks_120mhz.rs` (5 tests, 120 MHz overclock)
+
+### Clock Speed Presets (mk20d7)
+
+| Speed | Core | Bus | Flash | PRDIV | VDIV | Notes |
+|-------|------|-----|-------|-------|------|-------|
+| `Mhz72` | 72 MHz | 36 MHz | 24 MHz | ÷8 | ×36 | Datasheet rated max (default) |
+| `Mhz96` | 96 MHz | 48 MHz | 24 MHz | ÷4 | ×24 | Overclock, widely used |
+| `Mhz120` | 120 MHz | 60 MHz | 24 MHz | ÷4 | ×30 | Overclock, Teensyduino default |
+
+**Known limitation:** USB clock divider (SIM CLKDIV2) is currently hardcoded for 72 MHz PLL output. USB will not enumerate correctly at 96 or 120 MHz until the USB driver is updated to derive the correct divider from the actual PLL frequency.
 
 Reference: K20 ref manual chapters 5 (Clock Distribution), 12 (SIM), 24 (MCG)
 
@@ -128,6 +143,10 @@ Reference: K20 ref manual chapter 35 (UART)
 - [x] `SpiExt` extension trait on `pac::Spi0` (+ `pac::Spi1` for mk20d7)
 - [x] SPI1 feature-gated behind `mk20d7`
 - [x] Macro-generated implementation for each SPI instance
+- [x] `pack_pushr()` const fn — build 32-bit PUSHR command words (data + PCS + CONT + EOQ)
+- [x] MCR control: `flush_fifos()`, `set_rx_fifo()`, `set_rooe()`
+- [x] Status/request control: `clear_status()`, `disable_dma_requests()`, `wait_tx_complete()`
+- [x] `write_dma_pushr()` — 32-bit DMA writes to PUSHR with full command field control
 - [ ] Hardware validation: tests in `mk20dx-testsuite/tests/spi_loopback.rs` (7 tests, requires PTC6→PTC7 wire)
 
 Reference: K20 ref manual chapter 37 (DSPI)
@@ -182,9 +201,19 @@ Reference: K20 ref manual chapter 28 (PIT)
 - [x] FTM2 feature-gated behind `mk20d7`
 - [x] Edge-aligned PWM, high-true (MSB:MSA=10, ELSB:ELSA=10)
 - [x] Write protection disabled during init
+- [x] Combined mode: `FtmChannelPair<FTM, PAIR>` with complementary output, dead-time, and inversion
+- [x] `into_combined(partner)` on even channels, `into_channels()` to release pair
+- [x] Dead-time configuration: `FtmTimer::set_deadtime(prescaler, value)` (timer-wide DEADTIME register)
+- [x] Complementary output: `enable_complementary()`/`disable_complementary()` (COMP bit per-pair)
+- [x] Dead-time enable: `enable_deadtime()`/`disable_deadtime()` (DTEN bit per-pair)
+- [x] Output inversion: `set_inversion()` via INVCTRL (double-buffered)
+- [x] Enhanced sync: SYNCONF.SYNCMODE=1 set during `split()`/`pwm()` (backward-compatible)
+- [x] PWM sync control: `software_sync()`, `set_sync_loading_points(at_min, at_max)` on FtmTimer
+- [x] `ftm_pair_impl!` macro: FTM0 (4 pairs), FTM1 (1 pair), FTM2 (1 pair, mk20d7 only)
 - [ ] Hardware validation: tests in `mk20dx-testsuite/tests/pwm.rs` (7 tests, register-only)
+- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/pwm_combined.rs` (18 tests, register-only)
 
-Reference: K20 ref manual chapter 36 (FTM)
+Reference: K20 ref manual chapter 36 (FTM), §36.4.15 (COMBINE), §36.4.16 (DEADTIME), §36.4.21 (SYNC), §36.4.22 (INVCTRL), §36.4.27 (SYNCONF)
 
 ---
 
@@ -262,10 +291,10 @@ Reference: K20 ref manual chapter 34 (USB OTG / USB-FS)
 
 - [x] Test framework selection: `defmt-test` v0.3 with `probe-rs` runner
 - [x] Infrastructure: Cargo.toml, .cargo/config.toml, build.rs updated
-- [x] 10 self-test binaries (no external wiring): watchdog (3), clocks (6), gpio (8), delay (7), timer (10), adc (10), dma (11), pwm (7), i2c (4), usb (6)
-- [x] 10 additional self-test binaries (Phases 13-21): crc (7), dac (6), flash (6), eeprom (5), lptmr (8), rtc (8), cmp (7), power (3), llwu (5), pwm_advanced (9)
+- [x] 12 self-test binaries (no external wiring): watchdog (3), clocks (5), clocks_96mhz (5), clocks_120mhz (5), gpio (8), delay (7), timer (10), adc (10), dma (11), pwm (7), i2c (4), usb (6)
+- [x] 11 additional self-test binaries (Phases 13-21): crc (7), dac (6), flash (6), eeprom (5), lptmr (8), rtc (8), cmp (7), power (3), llwu (5), pwm_advanced (9), pwm_combined (18)
 - [x] 3 loopback test binaries (require wiring): gpio_loopback (2), uart_loopback (5), spi_loopback (7)
-- [x] All 23 blocking test binaries compile cleanly (`cargo check --tests`)
+- [x] All 26 blocking test binaries compile cleanly (`cargo check --tests`)
 - [x] Makefile with `make self-tests`, `make loopback-tests`, `make all-tests`, `make check`
 - [ ] On-target execution of self-tests
 - [ ] On-target execution of loopback tests (with wiring)
@@ -280,7 +309,7 @@ Reference: K20 ref manual chapter 34 (USB OTG / USB-FS)
 - [ ] On-target execution of async self-tests
 - [ ] On-target execution of async loopback tests
 
-**Total: 175 tests across 29 binaries (143 blocking + 32 async)**
+**Total: 203 tests across 32 binaries (171 blocking + 32 async)**
 
 ### Tests Requiring Additional Hardware (Not Implemented)
 
@@ -462,7 +491,7 @@ Reference: K20 ref manual chapter 29 (FTFL), chapter 30 (FlexMemory)
 
 - [x] `DmaTransfer<'a, CH>` lifetime-safe handle with abort-on-drop (`src/dma.rs`)
 - [x] `is_complete()`, `has_error()`, `wait()` (blocks until done or error)
-- [x] SPI + DMA: `write_dma()` with DMAMUX routing (SPI0_TX/RX, SPI1_TX/RX)
+- [x] SPI + DMA: `write_dma()` (8-bit) and `write_dma_pushr()` (32-bit PUSHR) with DMAMUX routing (SPI0_TX/RX, SPI1_TX/RX)
 - [x] UART + DMA: `write_dma()`, `read_dma()` with DMAMUX routing (UART0-2 TX/RX)
 - [x] ADC + DMA: `read_dma()` continuous conversion with DMAMUX routing (ADC0, ADC1)
 - [x] Per-instance DMA source constants passed via macro parameters
@@ -500,6 +529,7 @@ Reference: K20 ref manual chapter 36 (FTM)
 - [x] Wakeup flag reading and clearing (pin flags w1c, module flags read-only)
 - [x] MCG BLPI mode transitions (`enter_blpi()`, `exit_blpi()`) in `src/clocks.rs`
 - [x] `BlpiClocks` / `PeeState` types for type-safe mode management
+- [x] `PeeState` saves/restores SIM CLKDIV1 register (works with any `ClockSpeed` preset)
 - [x] SIM clock divider adjustment for VLPR limits (4 MHz core, 1 MHz bus/flash)
 - [x] StopMode, PowerMode, WakeEdge, LlwuPin, LlwuModule enums (all with defmt support)
 - [ ] Hardware validation: tests in `mk20dx-testsuite/tests/power.rs` (3 tests, initial state + config)

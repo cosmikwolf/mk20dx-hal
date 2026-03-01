@@ -112,6 +112,25 @@ pub fn calc_baud(bus_clk: u32, target: u32) -> (u8, u8, bool) {
     (best_br, best_pbr, best_dbr)
 }
 
+// ----- PUSHR Packing -----
+
+/// Build a PUSHR command word from TX data and control fields.
+///
+/// PUSHR layout:
+///   [31]    CONT  — Keep PCS asserted between transfers
+///   [30:28] CTAS  — CTAR select (hardcoded to 000 = CTAR0)
+///   [27]    EOQ   — End of Queue
+///   [26]    CTCNT — Clear transfer counter (hardcoded to 0)
+///   [21:16] PCS   — Peripheral chip select bitmask
+///   [15:0]  TXDATA — Transmit data
+pub const fn pack_pushr(data: u16, pcs: u8, cont: bool, eoq: bool) -> u32 {
+    let mut word = data as u32;
+    word |= ((pcs & 0x3F) as u32) << 16;
+    if cont { word |= 1 << 31; }
+    if eoq { word |= 1 << 27; }
+    word
+}
+
 // ----- Extension Trait -----
 
 /// Extension trait for creating SPI drivers from PAC SPI peripherals.
@@ -150,46 +169,46 @@ macro_rules! spi_impl {
 
                 // 1. Halt + Master mode + Enable module clocks, PCS0 inactive high
                 spi.mcr().write(|w| {
-                    w.mstr()._1()
-                     .halt()._1()
-                     .mdis()._0()
+                    w.mstr().master()
+                     .halt().halted()
+                     .mdis().enabled()
                      .pcsis()._1()
                 });
 
                 // 2. Flush FIFOs (CLR_TXF/CLR_RXF are self-clearing)
-                spi.mcr().modify(|_, w| w.clr_txf()._1().clr_rxf()._1());
+                spi.mcr().modify(|_, w| w.clr_txf().clear().clr_rxf().clear());
 
                 // 3. Clear all status flags (w1c — use write, not modify)
                 spi.sr().write(|w| {
-                    w.tcf()._1()
-                     .eoqf()._1()
-                     .tfuf()._1()
-                     .rfof()._1()
-                     .tfff()._1()
-                     .rfdf()._1()
+                    w.tcf().complete()
+                     .eoqf().set_()
+                     .tfuf().underflow()
+                     .rfof().overflow()
+                     .tfff().not_full()
+                     .rfdf().not_empty()
                 });
 
                 // 4. Configure CTAR0: 8-bit frame, MSB first, computed baud rate
                 spi.$ctar_fn(0).write(|w| {
                     let w = match config.mode.polarity {
-                        Polarity::IdleHigh => w.cpol()._1(),
-                        Polarity::IdleLow => w.cpol()._0(),
+                        Polarity::IdleHigh => w.cpol().idle_high(),
+                        Polarity::IdleLow => w.cpol().idle_low(),
                     };
                     let w = match config.mode.phase {
-                        Phase::CaptureOnSecondTransition => w.cpha()._1(),
-                        Phase::CaptureOnFirstTransition => w.cpha()._0(),
+                        Phase::CaptureOnSecondTransition => w.cpha().capture_following(),
+                        Phase::CaptureOnFirstTransition => w.cpha().capture_leading(),
                     };
                     let w = match pbr {
-                        0 => w.pbr()._00(),
-                        1 => w.pbr()._01(),
-                        2 => w.pbr()._10(),
-                        _ => w.pbr()._11(),
+                        0 => w.pbr().div2(),
+                        1 => w.pbr().div3(),
+                        2 => w.pbr().div5(),
+                        _ => w.pbr().div7(),
                     };
-                    let w = if dbr { w.dbr()._1() } else { w.dbr()._0() };
-                    let w = w.lsbfe()._0()
-                              .pcssck()._00()
-                              .pasc()._00()
-                              .pdt()._00();
+                    let w = if dbr { w.dbr().double() } else { w.dbr().normal() };
+                    let w = w.lsbfe().msb_first()
+                              .pcssck().scale1()
+                              .pasc().scale1()
+                              .pdt().scale1();
                     // SAFETY: fmsz is 4-bit (7 fits), br is 4-bit (from calc_baud),
                     // cssck/asc/dt are 4-bit fields; 0 fits all.
                     unsafe {
@@ -202,7 +221,7 @@ macro_rules! spi_impl {
                 });
 
                 // 5. Start transfers
-                spi.mcr().modify(|_, w| w.halt()._0());
+                spi.mcr().modify(|_, w| w.halt().running());
 
                 Spi { _spi: PhantomData }
             }
@@ -213,9 +232,9 @@ macro_rules! spi_impl {
                 let spi = Self::regs();
 
                 // Wait for TX FIFO space (no timeout — assumes responsive hardware)
-                while spi.sr().read().tfff().is_0() {}
+                while spi.sr().read().tfff().is_full() {}
                 // Clear TFFF (w1c)
-                spi.sr().write(|w| w.tfff()._1());
+                spi.sr().write(|w| w.tfff().not_full());
 
                 // Push data with PCS0 asserted, CTAR0
                 // SAFETY: txdata is a 16-bit field; u8 as u16 fits.
@@ -225,12 +244,12 @@ macro_rules! spi_impl {
                 });
 
                 // Wait for RX FIFO data
-                while spi.sr().read().rfdf().is_0() {}
+                while spi.sr().read().rfdf().is_empty() {}
 
                 // Check for RX overflow
-                if spi.sr().read().rfof().is_1() {
-                    spi.sr().write(|w| w.rfof()._1());
-                    spi.sr().write(|w| w.rfdf()._1());
+                if spi.sr().read().rfof().is_overflow() {
+                    spi.sr().write(|w| w.rfof().overflow());
+                    spi.sr().write(|w| w.rfdf().not_empty());
                     let _ = spi.popr().read();
                     return Err(Error::Overrun);
                 }
@@ -240,7 +259,7 @@ macro_rules! spi_impl {
                 // the flag to re-assert immediately (FIFO still non-empty),
                 // making the next call see a stale RFDF and skip the wait.
                 let data = spi.popr().read().rxdata().bits() as u8;
-                spi.sr().write(|w| w.rfdf()._1());
+                spi.sr().write(|w| w.rfdf().not_empty());
                 Ok(data)
             }
 
@@ -258,6 +277,46 @@ macro_rules! spi_impl {
             /// the appropriate `DmaSource` (e.g., `DmaSource::SPI0_RX`).
             pub fn rx_dma_addr() -> u32 {
                 <$PacType>::PTR as u32 + 0x38 // POPR offset
+            }
+
+            /// Flush both TX and RX FIFOs (CLR_TXF/CLR_RXF are self-clearing).
+            pub fn flush_fifos(&mut self) {
+                Self::regs().mcr().modify(|_, w| w.clr_txf().clear().clr_rxf().clear());
+            }
+
+            /// Enable or disable the RX FIFO.
+            /// Disable for TX-only DMA to prevent overflow when ignoring RX data.
+            pub fn set_rx_fifo(&mut self, enabled: bool) {
+                Self::regs().mcr().modify(|_, w| if enabled { w.dis_rxf().enabled() } else { w.dis_rxf().disabled() });
+            }
+
+            /// Enable or disable Receive FIFO Overflow Overwrite (ROOE).
+            /// When enabled, incoming data shifts in even when the FIFO is full.
+            pub fn set_rooe(&mut self, enabled: bool) {
+                Self::regs().mcr().modify(|_, w| if enabled { w.rooe().shift_in() } else { w.rooe().ignore() });
+            }
+
+            /// Clear all W1C status flags (TCF, EOQF, TFUF, RFOF, TFFF, RFDF).
+            pub fn clear_status(&mut self) {
+                Self::regs().sr().write(|w| {
+                    w.tcf().complete().eoqf().set_().tfuf().underflow()
+                     .rfof().overflow().tfff().not_full().rfdf().not_empty()
+                });
+            }
+
+            /// Disable all SPI DMA and interrupt requests (clears RSER to 0).
+            /// Call after DMA transfer completes to prevent spurious activations.
+            pub fn disable_dma_requests(&mut self) {
+                Self::regs().rser().write(|w| w); // RSER reset value is 0
+            }
+
+            /// Wait for TX FIFO to drain and last frame to shift out.
+            /// Call after DMA to ensure data is on the wire before deasserting CS.
+            pub fn wait_tx_complete(&self) {
+                let spi = Self::regs();
+                while spi.sr().read().txctr().bits() != 0 {}
+                while !spi.sr().read().tcf().is_complete() {}
+                spi.sr().write(|w| w.tcf().complete());
             }
 
             /// Start a DMA-backed write transfer.
@@ -294,9 +353,42 @@ macro_rules! spi_impl {
                 ch.set_source($tx_source);
 
                 // Enable SPI DMA TX request (RSER.TFFF_RE)
-                spi.rser().modify(|_, w| w.tfff_re()._1().tfff_dirs()._1());
+                spi.rser().modify(|_, w| w.tfff_re().enabled().tfff_dirs().dma());
 
                 // Enable DMA requests
+                ch.enable_request();
+
+                crate::dma::DmaTransfer { channel: ch }
+            }
+
+            /// Start a 32-bit DMA write to PUSHR using pre-packed command words.
+            ///
+            /// Each `u32` in `buf` is a complete PUSHR word (use [`pack_pushr()`] to build).
+            /// After [`DmaTransfer::wait()`], call [`disable_dma_requests()`](Self::disable_dma_requests)
+            /// to clean up.
+            ///
+            /// # Safety
+            ///
+            /// The caller must ensure `buf` remains valid for the duration of the
+            /// transfer (enforced by the lifetime on `DmaTransfer`).
+            pub fn write_dma_pushr<'a, const CH: u8>(
+                &'a mut self,
+                buf: &'a [u32],
+                ch: &'a mut crate::dma::DmaChannel<CH>,
+            ) -> crate::dma::DmaTransfer<'a, CH> {
+                let spi = Self::regs();
+
+                unsafe {
+                    ch.configure_peripheral_write(
+                        buf.as_ptr() as *const u8,
+                        Self::tx_dma_addr(),
+                        crate::dma::TransferSize::Bits32,
+                        buf.len() as u16,
+                    );
+                }
+
+                ch.set_source($tx_source);
+                spi.rser().modify(|_, w| w.tfff_re().enabled().tfff_dirs().dma());
                 ch.enable_request();
 
                 crate::dma::DmaTransfer { channel: ch }
@@ -314,7 +406,7 @@ macro_rules! spi_impl {
             pub unsafe fn release(self) -> $PacType {
                 let spi = Self::regs();
                 // Halt transfers and disable module
-                spi.mcr().modify(|_, w| w.halt()._1().mdis()._1());
+                spi.mcr().modify(|_, w| w.halt().halted().mdis().disabled());
                 <$PacType>::steal()
             }
         }
@@ -415,11 +507,11 @@ mod async_impl {
         waker: &AtomicWaker,
     ) {
         let sr = spi.sr().read();
-        if sr.tcf().is_1() {
+        if sr.tcf().is_complete() {
             // Clear TCF (w1c)
-            spi.sr().write(|w| w.tcf()._1());
+            spi.sr().write(|w| w.tcf().complete());
             // Disable TCF interrupt
-            spi.rser().modify(|_, w| w.tcf_re()._0());
+            spi.rser().modify(|_, w| w.tcf_re().disabled());
             waker.wake();
         }
     }
@@ -447,8 +539,8 @@ mod async_impl {
                     let spi = Self::regs();
 
                     // Wait for TX FIFO space
-                    while spi.sr().read().tfff().is_0() {}
-                    spi.sr().write(|w| w.tfff()._1());
+                    while spi.sr().read().tfff().is_full() {}
+                    spi.sr().write(|w| w.tfff().not_full());
 
                     // Push data with PCS0 asserted, CTAR0
                     // SAFETY: txdata is a 16-bit field; u8 as u16 fits.
@@ -457,16 +549,16 @@ mod async_impl {
                     });
 
                     // Enable TCF interrupt and await transfer complete
-                    spi.rser().modify(|_, w| w.tcf_re()._1());
+                    spi.rser().modify(|_, w| w.tcf_re().enabled());
                     core::future::poll_fn(|cx| {
                         $waker.register(cx.waker());
                         // Check if TCF_RE is disabled — means ISR already fired
-                        if spi.rser().read().tcf_re().is_0() {
+                        if spi.rser().read().tcf_re().is_disabled() {
                             core::task::Poll::Ready(())
-                        } else if spi.sr().read().tcf().is_1() {
+                        } else if spi.sr().read().tcf().is_complete() {
                             // Race: TCF set but ISR hasn't run yet
-                            spi.sr().write(|w| w.tcf()._1());
-                            spi.rser().modify(|_, w| w.tcf_re()._0());
+                            spi.sr().write(|w| w.tcf().complete());
+                            spi.rser().modify(|_, w| w.tcf_re().disabled());
                             core::task::Poll::Ready(())
                         } else {
                             core::task::Poll::Pending
@@ -475,14 +567,14 @@ mod async_impl {
                     .await;
 
                     // Check for RX overflow
-                    if spi.sr().read().rfof().is_1() {
-                        spi.sr().write(|w| w.rfof()._1());
-                        spi.sr().write(|w| w.rfdf()._1());
+                    if spi.sr().read().rfof().is_overflow() {
+                        spi.sr().write(|w| w.rfof().overflow());
+                        spi.sr().write(|w| w.rfdf().not_empty());
                         let _ = spi.popr().read();
                         return Err(Error::Overrun);
                     }
 
-                    spi.sr().write(|w| w.rfdf()._1());
+                    spi.sr().write(|w| w.rfdf().not_empty());
                     Ok(spi.popr().read().rxdata().bits() as u8)
                 }
             }

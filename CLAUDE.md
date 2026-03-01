@@ -73,14 +73,14 @@ mk20dx-hal/
 │   ├── lib.rs              # Feature gates, PAC re-export, module declarations
 │   ├── prelude.rs          # Glob import of commonly-used traits + extension traits
 │   ├── adc.rs              # AdcExt, ADC driver (HAL-specific, no standard trait)
-│   ├── clocks.rs           # McgExt, MCG+SIM clock configuration, Clocks token
+│   ├── clocks.rs           # McgExt, MCG+SIM clock configuration, ClockSpeed presets, Clocks token
 │   ├── delay.rs            # DelayNs via SysTick
 │   ├── dma.rs              # DmaExt, eDMA+DMAMUX driver (HAL-specific)
 │   ├── flash_config.rs     # 16-byte flash configuration field at 0x400
 │   ├── gpio.rs             # GpioExt, pin type-states, PORT mux, embedded-hal digital
 │   ├── i2c.rs              # I2cExt, I2C driver, embedded-hal I2c
 │   ├── pwm.rs              # FtmExt, FTM-based PWM, embedded-hal SetDutyCycle
-│   ├── spi.rs              # SpiExt, DSPI driver, embedded-hal SpiBus
+│   ├── spi.rs              # SpiExt, DSPI driver, embedded-hal SpiBus, PUSHR DMA
 │   ├── time.rs             # Re-exports fugit types for frequencies/durations
 │   ├── timer.rs            # PitExt, PIT timer abstractions
 │   ├── uart.rs             # UartExt, UART driver, embedded-hal-nb serial, embedded-io
@@ -107,7 +107,7 @@ Following the dominant embedded Rust ecosystem pattern (stm32f4xx-hal, nrf-hal, 
 
 | Extension Trait | PAC Type | Method | Returns |
 |----------------|----------|--------|---------|
-| `McgExt` | `pac::Mcg` | `constrain()` → `Mcg` → `freeze(osc, &sim)` | `Clocks` |
+| `McgExt` | `pac::Mcg` | `constrain()` → `Mcg` → `freeze(osc, &sim)` or `freeze_at(speed, osc, &sim)` | `Clocks` |
 | `GpioExt` | `pac::Porta`, etc. | `split(gpio, &sim)` | `PortAPins`, etc. |
 | `WdogExt` | `pac::Wdog` | `disable()` | `()` |
 | `UartExt` | `pac::Uart0`, etc. | `serial(tx, rx, baud, clocks, sim)` | `Serial<Instance>` |
@@ -130,6 +130,10 @@ dp.WDOG.disable();
 
 // Configure clocks: MCG → PLL → 72 MHz (consumes MCG + OSC, borrows SIM)
 let clocks = dp.MCG.constrain().freeze(dp.OSC, &dp.SIM);
+
+// Or use an overclock preset (mk20d7 only):
+// use mk20dx_hal::clocks::ClockSpeed;
+// let clocks = dp.MCG.constrain().freeze_at(ClockSpeed::Mhz96, dp.OSC, &dp.SIM);
 
 // Split GPIO ports (consumes PORT + GPIO peripherals, borrows SIM for clock gating)
 let pins_a = dp.PORTA.split(dp.PTA, &dp.SIM);
@@ -237,7 +241,7 @@ The MK20 clock tree flows through:
 3. **SIM** divides MCGOUTCLK into bus clocks: Core, Bus, FlexBus, Flash
 4. **SIM SCGC registers** gate clocks to individual peripherals (must be enabled before access)
 
-The `clock` module must configure MCG and SIM, then return a `Clocks` struct that records the resulting frequencies.
+The `clocks` module configures MCG and SIM, then returns a `Clocks` struct that records the resulting frequencies. On mk20d7, `freeze()` defaults to 72 MHz; `freeze_at(ClockSpeed::Mhz96)` or `freeze_at(ClockSpeed::Mhz120)` select overclock presets.
 
 ### embedded-hal 1.0 Notes
 

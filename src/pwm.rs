@@ -19,6 +19,193 @@ fn ftm_regs<FTM: sealed::FtmInstance>() -> &'static pac::ftm0::RegisterBlock {
     unsafe { &*FTM::ptr() }
 }
 
+/// Set a single channel's OUTINIT bit (initial output value on MODE.INIT trigger).
+fn set_outinit_bit<FTM: sealed::FtmInstance>(ch: u8, high: bool) {
+    let ftm = ftm_regs::<FTM>();
+    ftm.outinit().modify(|_, w| match (ch, high) {
+        (0, false) => w.ch0oi().low(),
+        (0, true) => w.ch0oi().high(),
+        (1, false) => w.ch1oi().low(),
+        (1, true) => w.ch1oi().high(),
+        (2, false) => w.ch2oi().low(),
+        (2, true) => w.ch2oi().high(),
+        (3, false) => w.ch3oi().low(),
+        (3, true) => w.ch3oi().high(),
+        (4, false) => w.ch4oi().low(),
+        (4, true) => w.ch4oi().high(),
+        (5, false) => w.ch5oi().low(),
+        (5, true) => w.ch5oi().high(),
+        (6, false) => w.ch6oi().low(),
+        (6, true) => w.ch6oi().high(),
+        (7, false) => w.ch7oi().low(),
+        (7, true) => w.ch7oi().high(),
+        _ => unreachable!(),
+    });
+}
+
+/// Set a single channel's POL bit (hardware output polarity inversion).
+fn set_pol_bit<FTM: sealed::FtmInstance>(ch: u8, active_low: bool) {
+    let ftm = ftm_regs::<FTM>();
+    ftm.pol().modify(|_, w| match (ch, active_low) {
+        (0, false) => w.pol0().active_high(),
+        (0, true) => w.pol0().active_low(),
+        (1, false) => w.pol1().active_high(),
+        (1, true) => w.pol1().active_low(),
+        (2, false) => w.pol2().active_high(),
+        (2, true) => w.pol2().active_low(),
+        (3, false) => w.pol3().active_high(),
+        (3, true) => w.pol3().active_low(),
+        (4, false) => w.pol4().active_high(),
+        (4, true) => w.pol4().active_low(),
+        (5, false) => w.pol5().active_high(),
+        (5, true) => w.pol5().active_low(),
+        (6, false) => w.pol6().active_high(),
+        (6, true) => w.pol6().active_low(),
+        (7, false) => w.pol7().active_high(),
+        (7, true) => w.pol7().active_low(),
+        _ => unreachable!(),
+    });
+}
+
+/// Set a pair's COMBINE bit (combined mode enable).
+///
+/// When set, channels (2*pair) and (2*pair+1) operate as a combined pair
+/// where CnV controls the leading edge and C(n+1)V controls the trailing edge.
+/// Requires FTMEN=1 and WPDIS=1. Ref manual §36.4.15 (K20P64M72SF1RM).
+fn set_combine_bit<FTM: sealed::FtmInstance>(pair: u8, enable: bool) {
+    let ftm = ftm_regs::<FTM>();
+    ftm.combine().modify(|_, w| match (pair, enable) {
+        (0, false) => w.combine0().disabled(),
+        (0, true) => w.combine0().enabled(),
+        (1, false) => w.combine1().disabled(),
+        (1, true) => w.combine1().enabled(),
+        (2, false) => w.combine2().disabled(),
+        (2, true) => w.combine2().enabled(),
+        (3, false) => w.combine3().disabled(),
+        (3, true) => w.combine3().enabled(),
+        _ => unreachable!(),
+    });
+}
+
+/// Set a pair's COMP bit (complementary output).
+///
+/// When set, channel (2*pair+1) output is the complement of channel (2*pair).
+/// This provides the inverted gate drive signal needed for half-bridge and
+/// H-bridge topologies. Ref manual §36.4.15 (K20P64M72SF1RM).
+fn set_comp_bit<FTM: sealed::FtmInstance>(pair: u8, enable: bool) {
+    let ftm = ftm_regs::<FTM>();
+    ftm.combine().modify(|_, w| match (pair, enable) {
+        (0, false) => w.comp0().disabled(),
+        (0, true) => w.comp0().enabled(),
+        (1, false) => w.comp1().disabled(),
+        (1, true) => w.comp1().enabled(),
+        (2, false) => w.comp2().disabled(),
+        (2, true) => w.comp2().enabled(),
+        (3, false) => w.comp3().disabled(),
+        (3, true) => w.comp3().enabled(),
+        _ => unreachable!(),
+    });
+}
+
+/// Set a pair's DTEN bit (dead-time insertion enable).
+///
+/// When set, dead-time is inserted at transitions between the complementary
+/// outputs of the pair. The dead-time duration is configured timer-wide via
+/// the DEADTIME register. Prevents shoot-through in half-bridge drivers.
+/// Ref manual §36.4.15 (K20P64M72SF1RM).
+fn set_dten_bit<FTM: sealed::FtmInstance>(pair: u8, enable: bool) {
+    let ftm = ftm_regs::<FTM>();
+    ftm.combine().modify(|_, w| match (pair, enable) {
+        (0, false) => w.dten0().disabled(),
+        (0, true) => w.dten0().enabled(),
+        (1, false) => w.dten1().disabled(),
+        (1, true) => w.dten1().enabled(),
+        (2, false) => w.dten2().disabled(),
+        (2, true) => w.dten2().enabled(),
+        (3, false) => w.dten3().disabled(),
+        (3, true) => w.dten3().enabled(),
+        _ => unreachable!(),
+    });
+}
+
+/// Set a pair's SYNCEN bit (PWM synchronization enable).
+///
+/// When set, the pair's CnV and C(n+1)V registers are updated from their
+/// write buffers at the configured loading point (SYNC.CNTMIN/CNTMAX).
+/// Required for glitch-free runtime updates in combined mode.
+/// Ref manual §36.4.15 (K20P64M72SF1RM).
+fn set_syncen_bit<FTM: sealed::FtmInstance>(pair: u8, enable: bool) {
+    let ftm = ftm_regs::<FTM>();
+    ftm.combine().modify(|_, w| match (pair, enable) {
+        (0, false) => w.syncen0().disabled(),
+        (0, true) => w.syncen0().enabled(),
+        (1, false) => w.syncen1().disabled(),
+        (1, true) => w.syncen1().enabled(),
+        (2, false) => w.syncen2().disabled(),
+        (2, true) => w.syncen2().enabled(),
+        (3, false) => w.syncen3().disabled(),
+        (3, true) => w.syncen3().enabled(),
+        _ => unreachable!(),
+    });
+}
+
+/// Set a pair's inversion bit in INVCTRL.
+///
+/// Controls the INVnEN bit for the given pair. When set, the pair's outputs
+/// are swapped. With SYNCONF.INVC=0 (default), takes effect at the next
+/// system clock edge (immediately). Ref manual §36.4.22 (K20P64M72SF1RM).
+fn set_inv_bit<FTM: sealed::FtmInstance>(pair: u8, enable: bool) {
+    let ftm = ftm_regs::<FTM>();
+    ftm.invctrl().modify(|_, w| match (pair, enable) {
+        (0, false) => w.inv0en().disabled(),
+        (0, true) => w.inv0en().enabled(),
+        (1, false) => w.inv1en().disabled(),
+        (1, true) => w.inv1en().enabled(),
+        (2, false) => w.inv2en().disabled(),
+        (2, true) => w.inv2en().enabled(),
+        (3, false) => w.inv3en().disabled(),
+        (3, true) => w.inv3en().enabled(),
+        _ => unreachable!(),
+    });
+}
+
+/// Set a single channel's SWOCTRL bits (software output control).
+///
+/// Controls both the CHnOC (enable) and CHnOCV (forced value) bits.
+/// When `enable` is true, the channel output is forced to the level
+/// specified by `high`. When `enable` is false, the channel returns
+/// to normal operation. Ref manual §36.4.19 (K20P64M72SF1RM).
+fn set_swoctrl<FTM: sealed::FtmInstance>(ch: u8, enable: bool, high: bool) {
+    let ftm = ftm_regs::<FTM>();
+    ftm.swoctrl().modify(|_, w| match (ch, enable, high) {
+        (0, true, true) => w.ch0oc().enabled().ch0ocv().force_high(),
+        (0, true, false) => w.ch0oc().enabled().ch0ocv().force_low(),
+        (0, false, _) => w.ch0oc().disabled(),
+        (1, true, true) => w.ch1oc().enabled().ch1ocv().force_high(),
+        (1, true, false) => w.ch1oc().enabled().ch1ocv().force_low(),
+        (1, false, _) => w.ch1oc().disabled(),
+        (2, true, true) => w.ch2oc().enabled().ch2ocv().force_high(),
+        (2, true, false) => w.ch2oc().enabled().ch2ocv().force_low(),
+        (2, false, _) => w.ch2oc().disabled(),
+        (3, true, true) => w.ch3oc().enabled().ch3ocv().force_high(),
+        (3, true, false) => w.ch3oc().enabled().ch3ocv().force_low(),
+        (3, false, _) => w.ch3oc().disabled(),
+        (4, true, true) => w.ch4oc().enabled().ch4ocv().force_high(),
+        (4, true, false) => w.ch4oc().enabled().ch4ocv().force_low(),
+        (4, false, _) => w.ch4oc().disabled(),
+        (5, true, true) => w.ch5oc().enabled().ch5ocv().force_high(),
+        (5, true, false) => w.ch5oc().enabled().ch5ocv().force_low(),
+        (5, false, _) => w.ch5oc().disabled(),
+        (6, true, true) => w.ch6oc().enabled().ch6ocv().force_high(),
+        (6, true, false) => w.ch6oc().enabled().ch6ocv().force_low(),
+        (6, false, _) => w.ch6oc().disabled(),
+        (7, true, true) => w.ch7oc().enabled().ch7ocv().force_high(),
+        (7, true, false) => w.ch7oc().enabled().ch7ocv().force_low(),
+        (7, false, _) => w.ch7oc().disabled(),
+        _ => unreachable!(),
+    });
+}
+
 // ----- Instance Markers -----
 
 /// Marker type for FTM0.
@@ -275,6 +462,10 @@ impl<FTM: sealed::FtmInstance> FtmTimer<FTM> {
     /// CPWMS is a timer-wide setting that affects all channels.
     /// Should be set while counter is stopped (CLKS=None); otherwise
     /// the change takes effect at the next counter overflow.
+    ///
+    /// **Note:** Center-aligned mode (CPWM) requires CNTIN=0x0000 and
+    /// is mutually exclusive with Combined mode (which requires
+    /// CPWMS=0). Ref manual §36.4.7 (K20P64M72SF1RM).
     pub fn set_alignment(&mut self, alignment: PwmAlignment) {
         let ftm = ftm_regs::<FTM>();
         ftm.sc().modify(|_, w| match alignment {
@@ -291,6 +482,123 @@ impl<FTM: sealed::FtmInstance> FtmTimer<FTM> {
         } else {
             PwmAlignment::EdgeAligned
         }
+    }
+
+    // --- Output initialization (OUTINIT + MODE.INIT) ---
+
+    /// Trigger the output initialization sequence.
+    ///
+    /// Sets MODE.INIT, which loads all OUTINIT values into the channel
+    /// outputs simultaneously. The INIT bit is self-clearing (hardware
+    /// clears it after the initialization completes).
+    ///
+    /// **Note:** The initialization feature must be used only in Combine
+    /// mode and with the FTM counter disabled (CLKS=None). Ref manual
+    /// §36.4.18 (K20P64M72SF1RM).
+    pub fn trigger_output_init(&mut self) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.mode().modify(|_, w| w.init().set_bit());
+    }
+
+    /// Bulk-set OUTINIT for all channels and trigger initialization.
+    ///
+    /// Each bit in `channel_mask` sets the initial output level for the
+    /// corresponding channel: bit N high = channel N initializes high,
+    /// bit N low = channel N initializes low. After writing OUTINIT,
+    /// MODE.INIT is set to apply the values.
+    ///
+    /// **Note:** The initialization feature must be used only in Combine
+    /// mode and with the FTM counter disabled (CLKS=None). Ref manual
+    /// §36.4.18 (K20P64M72SF1RM).
+    pub fn init_outputs(&mut self, channel_mask: u8) {
+        let ftm = ftm_regs::<FTM>();
+        // SAFETY: only the low 8 bits of OUTINIT are defined; channel_mask is u8.
+        ftm.outinit().write(|w| unsafe { w.bits(channel_mask as u32) });
+        ftm.mode().modify(|_, w| w.init().set_bit());
+    }
+
+    // --- Dead-time configuration (timer-wide DEADTIME register) ---
+
+    /// Configure the dead-time prescaler and value.
+    ///
+    /// Dead-time is inserted between complementary outputs of combined
+    /// channel pairs (when DTEN=1). The dead-time duration is:
+    ///
+    ///   `dead_time = dtval × (bus_clk_period × prescaler_divisor)`
+    ///
+    /// `dtval` is masked to 6 bits (0-63). The dead-time register is
+    /// timer-wide — all pairs share the same dead-time duration. Per-pair
+    /// dead-time enable is controlled via [`FtmChannelPair::enable_deadtime`].
+    ///
+    /// **Note:** The dead-time feature must be used only in Combine and
+    /// Complementary modes. Ref manual §36.4.16 (K20P64M72SF1RM).
+    pub fn set_deadtime(&mut self, prescaler: DeadtimePrescaler, dtval: u8) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.deadtime().write(|w| {
+            // SAFETY: dtval is a 6-bit field; value is masked to 0x3F.
+            let w = unsafe { w.dtval().bits(dtval & 0x3F) };
+            match prescaler {
+                DeadtimePrescaler::Div1 => w.dtps()._0x(),
+                DeadtimePrescaler::Div4 => w.dtps()._10(),
+                DeadtimePrescaler::Div16 => w.dtps()._11(),
+            }
+        });
+    }
+
+    /// Read the current dead-time prescaler setting.
+    pub fn deadtime_prescaler(&self) -> DeadtimePrescaler {
+        let ftm = ftm_regs::<FTM>();
+        let dtps = ftm.deadtime().read().dtps();
+        if dtps.is_10() {
+            DeadtimePrescaler::Div4
+        } else if dtps.is_11() {
+            DeadtimePrescaler::Div16
+        } else {
+            DeadtimePrescaler::Div1
+        }
+    }
+
+    /// Read the current dead-time value (DTVAL, 6 bits).
+    pub fn deadtime_value(&self) -> u8 {
+        let ftm = ftm_regs::<FTM>();
+        ftm.deadtime().read().dtval().bits()
+    }
+
+    // --- Sync control ---
+
+    /// Trigger a software synchronization.
+    ///
+    /// Sets SYNC.SWSYNC=1, which flushes double-buffered registers
+    /// (MOD, CNTIN, CnV) to their active values at the next loading
+    /// point. The SWSYNC bit is auto-cleared by hardware.
+    ///
+    /// Use this after updating combined-mode edge values via
+    /// [`FtmChannelPair::set_edges`] for glitch-free runtime updates.
+    ///
+    /// **Note:** PWM synchronization must be used only in Combine mode.
+    /// Ref manual §36.4.11, §36.4.21 (K20P64M72SF1RM).
+    pub fn software_sync(&mut self) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.sync().modify(|_, w| w.swsync()._1());
+    }
+
+    /// Configure PWM synchronization loading points.
+    ///
+    /// Controls when double-buffered register values (CnV, MOD, CNTIN)
+    /// are loaded into their active registers:
+    /// - `at_min`: load when the counter reaches CNTIN (period start)
+    /// - `at_max`: load when the counter reaches MOD (period end)
+    ///
+    /// At least one should be enabled for combined-mode operation.
+    ///
+    /// **Note:** PWM synchronization must be used only in Combine mode.
+    /// Ref manual §36.4.11, §36.4.21 (K20P64M72SF1RM).
+    pub fn set_sync_loading_points(&mut self, at_min: bool, at_max: bool) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.sync().modify(|_, w| {
+            let w = if at_min { w.cntmin()._1() } else { w.cntmin()._0() };
+            if at_max { w.cntmax()._1() } else { w.cntmax()._0() }
+        });
     }
 }
 
@@ -309,6 +617,89 @@ pub enum PwmPolarity {
     HighTrue,
     /// Low-true pulses (output low during active period). ELSB=0, ELSA=1.
     LowTrue,
+}
+
+// =====================================================================
+// Output Level (OUTINIT / SWOCTRL)
+// =====================================================================
+
+/// Logic level for channel output initialization (OUTINIT) and
+/// software output control (SWOCTRL).
+///
+/// Used with [`FtmChannel::set_output_init`] and [`FtmChannel::force_output`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum OutputLevel {
+    /// Output driven low.
+    Low,
+    /// Output driven high.
+    High,
+}
+
+// =====================================================================
+// Output Polarity (POL register)
+// =====================================================================
+
+/// Hardware output polarity (POL register).
+///
+/// Controls final-stage inversion of the FTM channel output. This is
+/// distinct from [`PwmPolarity`] which shapes the PWM waveform via
+/// the CnSC ELS bits.
+///
+/// Used with [`FtmChannel::set_polarity`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum Polarity {
+    /// Channel output is active-high (no inversion).
+    ActiveHigh,
+    /// Channel output is active-low (inverted).
+    ActiveLow,
+}
+
+// =====================================================================
+// Dead-Time Prescaler (DEADTIME.DTPS)
+// =====================================================================
+
+/// Dead-time insertion prescaler (DEADTIME.DTPS field).
+///
+/// Selects the clock divider applied to the system (bus) clock before
+/// the dead-time counter. The resulting dead-time duration is:
+///
+///   `dead_time = DTVAL × (bus_clk_period × prescaler_divisor)`
+///
+/// For example, at 36 MHz bus clock with `Div1` and DTVAL=10:
+///   `10 × (1/36 MHz) × 1 ≈ 278 ns`
+///
+/// Ref manual §36.4.16 (K20P64M72SF1RM).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum DeadtimePrescaler {
+    /// Divide by 1 (DTPS = 0x).
+    Div1,
+    /// Divide by 4 (DTPS = 10).
+    Div4,
+    /// Divide by 16 (DTPS = 11).
+    Div16,
+}
+
+// =====================================================================
+// Pair Inversion (INVCTRL)
+// =====================================================================
+
+/// Output inversion state for a combined channel pair.
+///
+/// Controls the INVCTRL register's INVnEN bit for a channel pair.
+/// When inverted, the pair's outputs are swapped. Takes effect
+/// immediately by default (SYNCONF.INVC=0).
+///
+/// Ref manual §36.4.22 (K20P64M72SF1RM).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum PairInversion {
+    /// Normal output (no inversion).
+    Normal,
+    /// Inverted output (pair outputs swapped).
+    Inverted,
 }
 
 // =====================================================================
@@ -334,6 +725,9 @@ impl<FTM: sealed::FtmInstance, const CH: u8> FtmChannel<FTM, CH> {
     ///
     /// Sets MSB:MSA=10, ELSB:ELSA=10. Output is set on counter wrap
     /// (MOD→CNTIN) and cleared on CnV match.
+    ///
+    /// **Note:** EPWM mode must be used only with CNTIN=0x0000.
+    /// Ref manual §36.4.6 (K20P64M72SF1RM).
     pub fn set_pwm(&mut self) {
         let ftm = ftm_regs::<FTM>();
         ftm.csc(CH as usize).write(|w| {
@@ -347,7 +741,9 @@ impl<FTM: sealed::FtmInstance, const CH: u8> FtmChannel<FTM, CH> {
     /// `HighTrue`: output is high during the active duty cycle (default).
     /// `LowTrue`: output is low during the active duty cycle (inverted).
     ///
-    /// Works with both edge-aligned and center-aligned modes.
+    /// Works with both edge-aligned (EPWM) and center-aligned (CPWM) modes.
+    /// Both require CNTIN=0x0000. Ref manual §36.4.6, §36.4.7
+    /// (K20P64M72SF1RM).
     pub fn set_pwm_polarity(&mut self, polarity: PwmPolarity) {
         let ftm = ftm_regs::<FTM>();
         ftm.csc(CH as usize).write(|w| {
@@ -363,6 +759,9 @@ impl<FTM: sealed::FtmInstance, const CH: u8> FtmChannel<FTM, CH> {
     ///
     /// Sets MSB=0, MSA=1, ELS per action. The channel output performs
     /// `action` when the counter matches `compare`.
+    ///
+    /// **Note:** Output Compare mode must be used only with CNTIN=0x0000.
+    /// Ref manual §36.4.6 (K20P64M72SF1RM).
     pub fn set_output_compare(&mut self, action: CompareAction, compare: u16) {
         let ftm = ftm_regs::<FTM>();
         // Configure CnSC for output compare BEFORE writing CnV.
@@ -382,6 +781,9 @@ impl<FTM: sealed::FtmInstance, const CH: u8> FtmChannel<FTM, CH> {
     ///
     /// Sets MSB:MSA=00, ELS per edge. The channel captures the counter
     /// value when the configured edge is detected.
+    ///
+    /// **Note:** Input Capture mode must be used only with CNTIN=0x0000.
+    /// Ref manual §36.4.5 (K20P64M72SF1RM).
     pub fn set_input_capture(&mut self, edge: CaptureEdge) {
         let ftm = ftm_regs::<FTM>();
         ftm.csc(CH as usize).write(|w| {
@@ -430,11 +832,19 @@ impl<FTM: sealed::FtmInstance, const CH: u8> FtmChannel<FTM, CH> {
 
     /// Clear the channel flag (CHF).
     ///
-    /// CHF is cleared by reading CnSC (with CHF=1) then writing 0 to
-    /// the CHF bit position; `modify()` accomplishes this.
+    /// CHF is cleared by reading CnSC while CHF is set, then writing 0
+    /// to CHF (bit 7). The SVD marks CHF as read-only, so `modify()`
+    /// would write back the read value (CHF=1), which does **not** clear
+    /// CHF — "writing a 1 to CHF has no effect" (K20 ref manual §36.3.6).
+    /// We use raw bits to force bit 7 to 0 in the write-back.
     pub fn clear_flag(&mut self) {
         let ftm = ftm_regs::<FTM>();
-        ftm.csc(CH as usize).modify(|_, w| w);
+        let csc = ftm.csc(CH as usize);
+        let bits = csc.read().bits();
+        // SAFETY: we preserve all read-write field values from the read;
+        // only CHF (bit 7, read-only per SVD but clearable per refman)
+        // is forced to 0.
+        csc.write(|w| unsafe { w.bits(bits & !(1 << 7)) });
     }
 
     /// Enable the channel interrupt (CHIE).
@@ -464,6 +874,149 @@ impl<FTM: sealed::FtmInstance, const CH: u8> FtmChannel<FTM, CH> {
     pub fn disable_dma(&mut self) {
         let ftm = ftm_regs::<FTM>();
         ftm.csc(CH as usize).modify(|_, w| w.dma()._0().chie()._0());
+    }
+
+    // --- Output initialization (OUTINIT) ---
+
+    /// Set the initial output value for this channel.
+    ///
+    /// The configured level is applied to the channel output when
+    /// [`FtmTimer::trigger_output_init`] sets MODE.INIT.
+    ///
+    /// **Note:** The initialization feature must be used only in Combine
+    /// mode and with the FTM counter disabled (CLKS=None). Ref manual
+    /// §36.4.18 (K20P64M72SF1RM).
+    pub fn set_output_init(&mut self, level: OutputLevel) {
+        set_outinit_bit::<FTM>(CH, matches!(level, OutputLevel::High));
+    }
+
+    /// Read the current OUTINIT value for this channel.
+    pub fn output_init(&self) -> OutputLevel {
+        let ftm = ftm_regs::<FTM>();
+        let r = ftm.outinit().read();
+        let high = match CH {
+            0 => r.ch0oi().is_high(),
+            1 => r.ch1oi().is_high(),
+            2 => r.ch2oi().is_high(),
+            3 => r.ch3oi().is_high(),
+            4 => r.ch4oi().is_high(),
+            5 => r.ch5oi().is_high(),
+            6 => r.ch6oi().is_high(),
+            7 => r.ch7oi().is_high(),
+            _ => unreachable!(),
+        };
+        if high { OutputLevel::High } else { OutputLevel::Low }
+    }
+
+    // --- Output polarity (POL register) ---
+
+    /// Set hardware output polarity for this channel.
+    ///
+    /// `ActiveLow` inverts the final output stage. This is distinct from
+    /// [`set_pwm_polarity`](Self::set_pwm_polarity) which controls the
+    /// CnSC ELS bits (PWM waveform shape).
+    ///
+    /// **Note:** The polarity control must be used only in Combine mode.
+    /// Ref manual §36.4.12 (K20P64M72SF1RM).
+    pub fn set_polarity(&mut self, pol: Polarity) {
+        set_pol_bit::<FTM>(CH, matches!(pol, Polarity::ActiveLow));
+    }
+
+    /// Read the current hardware output polarity for this channel.
+    pub fn polarity(&self) -> Polarity {
+        let ftm = ftm_regs::<FTM>();
+        let r = ftm.pol().read();
+        let active_low = match CH {
+            0 => r.pol0().is_active_low(),
+            1 => r.pol1().is_active_low(),
+            2 => r.pol2().is_active_low(),
+            3 => r.pol3().is_active_low(),
+            4 => r.pol4().is_active_low(),
+            5 => r.pol5().is_active_low(),
+            6 => r.pol6().is_active_low(),
+            7 => r.pol7().is_active_low(),
+            _ => unreachable!(),
+        };
+        if active_low { Polarity::ActiveLow } else { Polarity::ActiveHigh }
+    }
+
+    // --- Software output control (SWOCTRL) ---
+
+    /// Force this channel's output to a specific logic level.
+    ///
+    /// Enables software output control (CHnOC) and sets the forced
+    /// value (CHnOCV) in a single register write. The channel output
+    /// is driven to `level` regardless of the PWM/OC waveform.
+    ///
+    /// Requires FTMEN=1 (set by [`FtmExt::split`]/[`FtmExt::pwm`]).
+    ///
+    /// **Note:** The software output control feature must be used only
+    /// in Combine mode. SWOCTRL bits are updated at the next loading
+    /// point when SYNCMODE=0, or immediately when SYNCMODE=1.
+    /// Ref manual §36.4.14, §36.4.19 (K20P64M72SF1RM).
+    pub fn force_output(&mut self, level: OutputLevel) {
+        let high = matches!(level, OutputLevel::High);
+        set_swoctrl::<FTM>(CH, true, high);
+    }
+
+    /// Release software output control, returning to normal operation.
+    ///
+    /// Clears CHnOC for this channel. The output resumes being driven
+    /// by the configured PWM/OC mode. Combine mode only (ref manual
+    /// §36.4.14).
+    pub fn release_output(&mut self) {
+        set_swoctrl::<FTM>(CH, false, false);
+    }
+
+    /// Check if software output control is active for this channel.
+    pub fn is_output_forced(&self) -> bool {
+        let ftm = ftm_regs::<FTM>();
+        let r = ftm.swoctrl().read();
+        match CH {
+            0 => r.ch0oc().is_enabled(),
+            1 => r.ch1oc().is_enabled(),
+            2 => r.ch2oc().is_enabled(),
+            3 => r.ch3oc().is_enabled(),
+            4 => r.ch4oc().is_enabled(),
+            5 => r.ch5oc().is_enabled(),
+            6 => r.ch6oc().is_enabled(),
+            7 => r.ch7oc().is_enabled(),
+            _ => unreachable!(),
+        }
+    }
+
+    /// Read the forced output value if software control is active.
+    ///
+    /// Returns `Some(level)` if CHnOC is set, `None` otherwise.
+    pub fn forced_output(&self) -> Option<OutputLevel> {
+        let ftm = ftm_regs::<FTM>();
+        let r = ftm.swoctrl().read();
+        let enabled = match CH {
+            0 => r.ch0oc().is_enabled(),
+            1 => r.ch1oc().is_enabled(),
+            2 => r.ch2oc().is_enabled(),
+            3 => r.ch3oc().is_enabled(),
+            4 => r.ch4oc().is_enabled(),
+            5 => r.ch5oc().is_enabled(),
+            6 => r.ch6oc().is_enabled(),
+            7 => r.ch7oc().is_enabled(),
+            _ => unreachable!(),
+        };
+        if !enabled {
+            return None;
+        }
+        let high = match CH {
+            0 => r.ch0ocv().is_force_high(),
+            1 => r.ch1ocv().is_force_high(),
+            2 => r.ch2ocv().is_force_high(),
+            3 => r.ch3ocv().is_force_high(),
+            4 => r.ch4ocv().is_force_high(),
+            5 => r.ch5ocv().is_force_high(),
+            6 => r.ch6ocv().is_force_high(),
+            7 => r.ch7ocv().is_force_high(),
+            _ => unreachable!(),
+        };
+        Some(if high { OutputLevel::High } else { OutputLevel::Low })
     }
 
     // --- Input capture convenience ---
@@ -496,6 +1049,301 @@ impl<FTM: sealed::FtmInstance, const CH: u8> embedded_hal::pwm::SetDutyCycle for
     fn set_duty_cycle(&mut self, duty: u16) -> Result<(), Self::Error> {
         self.set_value(duty);
         Ok(())
+    }
+}
+
+// =====================================================================
+// FtmChannelPair — combined mode channel pair
+// =====================================================================
+
+/// A pair of adjacent FTM channels operating in combined mode.
+///
+/// Combined mode pairs channels (n, n+1) where:
+/// - CnV controls the **leading edge** (output asserts)
+/// - C(n+1)V controls the **trailing edge** (output deasserts)
+///
+/// This enables complementary PWM with dead-time insertion, essential for
+/// motor control (H-bridges, 3-phase inverters) and other applications
+/// requiring non-overlapping complementary outputs.
+///
+/// Created by calling [`FtmChannel::into_combined`] on an even channel,
+/// consuming both the even and odd channel handles. Can be released back
+/// to independent channels via [`into_channels`](Self::into_channels).
+///
+/// **Hardware constraint:** Combined mode requires CPWMS=0 (edge-aligned
+/// counting). It is mutually exclusive with center-aligned mode.
+///
+/// # Synchronization
+///
+/// CnV/C(n+1)V writes are double-buffered. Call
+/// [`FtmTimer::software_sync`] to commit pending values at the next
+/// loading point (configured via [`FtmTimer::set_sync_loading_points`]).
+///
+/// Ref manual §36.4.15 (COMBINE), §36.4.16 (DEADTIME), §36.4.22 (INVCTRL)
+/// (K20P64M72SF1RM).
+pub struct FtmChannelPair<FTM, const PAIR: u8> {
+    _ftm: PhantomData<FTM>,
+}
+
+impl<FTM: sealed::FtmInstance, const PAIR: u8> FtmChannelPair<FTM, PAIR> {
+    /// Even channel index for this pair.
+    const EVEN: usize = (PAIR as usize) * 2;
+    /// Odd channel index for this pair.
+    const ODD: usize = (PAIR as usize) * 2 + 1;
+
+    /// Initialize combined mode for this channel pair.
+    ///
+    /// Configures both channels for combined PWM, enables enhanced sync
+    /// buffering (SYNCONF.SWWRBUF), sets the loading point to counter
+    /// minimum (SYNC.CNTMIN), and enables the COMBINE bit.
+    ///
+    /// Called by the macro-generated `into_combined()` method.
+    fn new_init() -> Self {
+        let ftm = ftm_regs::<FTM>();
+
+        // Configure CnSC for both channels: MSB=1, ELSB=1 (high-true combined PWM)
+        ftm.csc(Self::EVEN).write(|w| w.msb().set_bit().elsb().set_bit());
+        ftm.csc(Self::ODD).write(|w| w.msb().set_bit().elsb().set_bit());
+
+        // Initialize CV registers to 0 (0% duty)
+        // SAFETY: val is a 16-bit field; 0 fits.
+        ftm.cv(Self::EVEN).write(|w| unsafe { w.val().bits(0) });
+        ftm.cv(Self::ODD).write(|w| unsafe { w.val().bits(0) });
+
+        // Enable CV double-buffering via software trigger.
+        // SYNCONF.SWWRBUF=1: software trigger flushes MOD/CNTIN/CV write buffers.
+        // SYNCONF.INVC is left at 0 so INVCTRL updates take effect immediately
+        // (at every system clock edge). This is the right default since inversion
+        // is typically configured once at init. Users needing synchronized inversion
+        // changes can set SYNCONF.INVC=1 via the PAC directly.
+        // Ref manual §36.4.27.
+        ftm.synconf().modify(|_, w| w.swwrbuf()._1());
+
+        // Set loading point: update at counter minimum (period boundary).
+        // Ref manual §36.4.21.
+        ftm.sync().modify(|_, w| w.cntmin()._1());
+
+        // Enable PWM sync for this pair, then enable combined mode.
+        // SYNCEN must be set before COMBINE for proper synchronization.
+        // Ref manual §36.4.15.
+        set_syncen_bit::<FTM>(PAIR, true);
+        set_combine_bit::<FTM>(PAIR, true);
+
+        FtmChannelPair { _ftm: PhantomData }
+    }
+
+    // --- Edge control ---
+
+    /// Set the leading edge value (CnV for the even channel).
+    ///
+    /// The output asserts (goes active) when the counter reaches this value.
+    /// Double-buffered: takes effect at the next loading point after a
+    /// software sync trigger. Ref manual §36.4.15.
+    pub fn set_leading_edge(&mut self, val: u16) {
+        let ftm = ftm_regs::<FTM>();
+        // SAFETY: val is a 16-bit field; val is u16.
+        ftm.cv(Self::EVEN).write(|w| unsafe { w.val().bits(val) });
+    }
+
+    /// Set the trailing edge value (C(n+1)V for the odd channel).
+    ///
+    /// The output deasserts (goes inactive) when the counter reaches this value.
+    /// Double-buffered: takes effect at the next loading point after a
+    /// software sync trigger. Ref manual §36.4.15.
+    pub fn set_trailing_edge(&mut self, val: u16) {
+        let ftm = ftm_regs::<FTM>();
+        // SAFETY: val is a 16-bit field; val is u16.
+        ftm.cv(Self::ODD).write(|w| unsafe { w.val().bits(val) });
+    }
+
+    /// Set both leading and trailing edge values.
+    ///
+    /// Convenience method for asymmetric PWM. The active pulse spans from
+    /// `leading` to `trailing` counter values. For example, `set_edges(100, 500)`
+    /// produces a pulse from count 100 to count 500.
+    ///
+    /// Double-buffered: call [`FtmTimer::software_sync`] to commit.
+    pub fn set_edges(&mut self, leading: u16, trailing: u16) {
+        let ftm = ftm_regs::<FTM>();
+        // SAFETY: val is a 16-bit field; values are u16.
+        ftm.cv(Self::EVEN).write(|w| unsafe { w.val().bits(leading) });
+        ftm.cv(Self::ODD).write(|w| unsafe { w.val().bits(trailing) });
+    }
+
+    /// Read the current leading edge value.
+    pub fn leading_edge(&self) -> u16 {
+        let ftm = ftm_regs::<FTM>();
+        ftm.cv(Self::EVEN).read().val().bits()
+    }
+
+    /// Read the current trailing edge value.
+    pub fn trailing_edge(&self) -> u16 {
+        let ftm = ftm_regs::<FTM>();
+        ftm.cv(Self::ODD).read().val().bits()
+    }
+
+    /// Set symmetric duty cycle (leading edge at 0).
+    ///
+    /// Equivalent to `set_edges(0, duty)`. The active pulse spans from
+    /// counter value 0 to `duty`.
+    pub fn set_duty(&mut self, duty: u16) {
+        self.set_edges(0, duty);
+    }
+
+    /// Read the MOD register (maximum duty value).
+    ///
+    /// The duty cycle as a fraction of the period is `duty / max_duty()`.
+    pub fn max_duty(&self) -> u16 {
+        let ftm = ftm_regs::<FTM>();
+        ftm.mod_().read().mod_().bits()
+    }
+
+    // --- Complementary output (COMP bit in COMBINE) ---
+
+    /// Enable complementary output for this pair.
+    ///
+    /// When enabled, channel (n+1) output is the hardware complement of
+    /// channel (n). This provides the inverted gate drive signal needed
+    /// for half-bridge and H-bridge topologies.
+    /// Ref manual §36.4.15 (K20P64M72SF1RM).
+    pub fn enable_complementary(&mut self) {
+        set_comp_bit::<FTM>(PAIR, true);
+    }
+
+    /// Disable complementary output (both channels driven independently).
+    pub fn disable_complementary(&mut self) {
+        set_comp_bit::<FTM>(PAIR, false);
+    }
+
+    /// Check if complementary output is enabled.
+    pub fn is_complementary(&self) -> bool {
+        let ftm = ftm_regs::<FTM>();
+        let r = ftm.combine().read();
+        match PAIR {
+            0 => r.comp0().is_enabled(),
+            1 => r.comp1().is_enabled(),
+            2 => r.comp2().is_enabled(),
+            3 => r.comp3().is_enabled(),
+            _ => unreachable!(),
+        }
+    }
+
+    // --- Dead-time enable (DTEN bit in COMBINE) ---
+
+    /// Enable dead-time insertion for this pair.
+    ///
+    /// Dead-time is inserted at transitions between the complementary outputs,
+    /// preventing shoot-through in half-bridge drivers. The dead-time duration
+    /// is configured timer-wide via [`FtmTimer::set_deadtime`].
+    ///
+    /// Typically used together with [`enable_complementary`](Self::enable_complementary).
+    /// Ref manual §36.4.15, §36.4.16 (K20P64M72SF1RM).
+    pub fn enable_deadtime(&mut self) {
+        set_dten_bit::<FTM>(PAIR, true);
+    }
+
+    /// Disable dead-time insertion.
+    pub fn disable_deadtime(&mut self) {
+        set_dten_bit::<FTM>(PAIR, false);
+    }
+
+    /// Check if dead-time insertion is enabled.
+    pub fn is_deadtime_enabled(&self) -> bool {
+        let ftm = ftm_regs::<FTM>();
+        let r = ftm.combine().read();
+        match PAIR {
+            0 => r.dten0().is_enabled(),
+            1 => r.dten1().is_enabled(),
+            2 => r.dten2().is_enabled(),
+            3 => r.dten3().is_enabled(),
+            _ => unreachable!(),
+        }
+    }
+
+    // --- PWM synchronization (SYNCEN bit in COMBINE) ---
+
+    /// Enable PWM synchronization for this pair.
+    ///
+    /// When enabled, CnV and C(n+1)V writes go to a buffer and are
+    /// transferred to the active registers only at the configured
+    /// loading point after a [`FtmTimer::software_sync`] trigger.
+    /// This provides glitch-free updates for motor control applications.
+    ///
+    /// Enabled by default in [`into_combined`](FtmChannel::into_combined).
+    /// Ref manual §36.4.15 (K20P64M72SF1RM).
+    pub fn enable_sync(&mut self) {
+        set_syncen_bit::<FTM>(PAIR, true);
+    }
+
+    /// Disable PWM synchronization for this pair.
+    ///
+    /// When disabled, CnV writes update via normal FTM double-buffering
+    /// (latched at counter overflow) without requiring a software sync
+    /// trigger. This is useful for DMA-driven applications where each
+    /// CnV write must take effect on the very next PWM period.
+    ///
+    /// Ref manual §36.4.15 (K20P64M72SF1RM).
+    pub fn disable_sync(&mut self) {
+        set_syncen_bit::<FTM>(PAIR, false);
+    }
+
+    /// Check if PWM synchronization is enabled for this pair.
+    pub fn is_sync_enabled(&self) -> bool {
+        let ftm = ftm_regs::<FTM>();
+        let r = ftm.combine().read();
+        match PAIR {
+            0 => r.syncen0().is_enabled(),
+            1 => r.syncen1().is_enabled(),
+            2 => r.syncen2().is_enabled(),
+            3 => r.syncen3().is_enabled(),
+            _ => unreachable!(),
+        }
+    }
+
+    // --- Output inversion (INVCTRL) ---
+
+    /// Set the output inversion state for this pair.
+    ///
+    /// When [`PairInversion::Inverted`], the pair's outputs are swapped.
+    /// By default (SYNCONF.INVC=0), takes effect at the next system
+    /// clock edge (effectively immediately). Ref manual §36.4.22
+    /// (K20P64M72SF1RM).
+    pub fn set_inversion(&mut self, inv: PairInversion) {
+        set_inv_bit::<FTM>(PAIR, matches!(inv, PairInversion::Inverted));
+    }
+
+    /// Read the current inversion state.
+    pub fn inversion(&self) -> PairInversion {
+        let ftm = ftm_regs::<FTM>();
+        let r = ftm.invctrl().read();
+        let inverted = match PAIR {
+            0 => r.inv0en().is_enabled(),
+            1 => r.inv1en().is_enabled(),
+            2 => r.inv2en().is_enabled(),
+            3 => r.inv3en().is_enabled(),
+            _ => unreachable!(),
+        };
+        if inverted { PairInversion::Inverted } else { PairInversion::Normal }
+    }
+
+    // --- PWM polarity (CnSC ELS bits for even channel) ---
+
+    /// Set the PWM polarity for the combined pair.
+    ///
+    /// Controls the ELS bits on the even channel's CnSC register.
+    /// `HighTrue`: output is high during the active period (ELSB=1, ELSA=0).
+    /// `LowTrue`: output is low during the active period (ELSB=0, ELSA=1).
+    ///
+    /// Ref manual §36.4.6 (K20P64M72SF1RM).
+    pub fn set_pwm_polarity(&mut self, pol: PwmPolarity) {
+        let ftm = ftm_regs::<FTM>();
+        ftm.csc(Self::EVEN).write(|w| {
+            let w = w.msb().set_bit();
+            match pol {
+                PwmPolarity::HighTrue => w.elsb().set_bit(),
+                PwmPolarity::LowTrue => w.elsa().set_bit(),
+            }
+        });
     }
 }
 
@@ -643,8 +1491,13 @@ macro_rules! ftm_impl {
                 // Stop counter
                 ftm.sc().write(|w| w.clks().none());
 
-                // Disable write protection
+                // Disable write protection first (FTMEN still 0).
+                // Per ref manual §36.4.27, SYNCONF should be written while
+                // FTMEN=0 so enhanced sync mode is latched before FTM
+                // features are enabled.
                 ftm.mode().write(|w| w.wpdis()._1());
+                ftm.synconf().write(|w| w.syncmode()._1());
+                ftm.mode().modify(|_, w| w.ftmen()._1());
 
                 // SAFETY: init/count are 16-bit fields; 0 fits.
                 ftm.cntin().write(|w| unsafe { w.init().bits(0) });
@@ -668,8 +1521,10 @@ macro_rules! ftm_impl {
                 // 1. Disable counter (CLKS=None)
                 ftm.sc().write(|w| w.clks().none());
 
-                // 2. Disable write protection
+                // 2. Disable write protection, enable enhanced sync, then FTMEN
                 ftm.mode().write(|w| w.wpdis()._1());
+                ftm.synconf().write(|w| w.syncmode()._1());
+                ftm.mode().modify(|_, w| w.ftmen()._1());
 
                 // SAFETY: init/mod_/count are 16-bit fields; values fit.
                 ftm.cntin().write(|w| unsafe { w.init().bits(0) });
@@ -724,6 +1579,65 @@ ftm_impl!(pac::Ftm2, Ftm2,
     Ftm2Channels { ch0:0, ch1:1 },
     scgc3, ftm2
 );
+
+// =====================================================================
+// Combined-mode pair constructors (into_combined / into_channels)
+// =====================================================================
+
+/// Generates `into_combined()` on the even `FtmChannel` and `into_channels()`
+/// on the resulting `FtmChannelPair`, linking a specific (even, odd) channel
+/// pair to a PAIR index without requiring unstable `generic_const_exprs`.
+macro_rules! ftm_pair_impl {
+    ($Instance:ty, pair: $PAIR:literal, even: $EVEN:literal, odd: $ODD:literal) => {
+        impl FtmChannel<$Instance, $EVEN> {
+            /// Consume this channel and its partner to create a combined-mode pair.
+            ///
+            /// Configures channels for combined PWM: the even channel's CnV
+            /// controls the leading edge, the odd channel's C(n+1)V controls
+            /// the trailing edge. Both channels start at 0% duty.
+            ///
+            /// After creation, call [`FtmChannelPair::enable_complementary`]
+            /// and [`FtmChannelPair::enable_deadtime`] as needed.
+            ///
+            /// Ref manual §36.4.15 (K20P64M72SF1RM).
+            pub fn into_combined(
+                self, _partner: FtmChannel<$Instance, $ODD>,
+            ) -> FtmChannelPair<$Instance, $PAIR> {
+                FtmChannelPair::new_init()
+            }
+        }
+        impl FtmChannelPair<$Instance, $PAIR> {
+            /// Release the combined pair back into two independent channels.
+            ///
+            /// Clears COMBINE, COMP, DTEN, and SYNCEN for this pair.
+            /// The returned channels are in an unconfigured state — call
+            /// [`FtmChannel::set_pwm`] or another mode method to resume use.
+            pub fn into_channels(self) -> (
+                FtmChannel<$Instance, $EVEN>,
+                FtmChannel<$Instance, $ODD>,
+            ) {
+                set_combine_bit::<$Instance>($PAIR, false);
+                set_comp_bit::<$Instance>($PAIR, false);
+                set_dten_bit::<$Instance>($PAIR, false);
+                set_syncen_bit::<$Instance>($PAIR, false);
+                (FtmChannel { _ftm: PhantomData }, FtmChannel { _ftm: PhantomData })
+            }
+        }
+    };
+}
+
+// FTM0: 4 pairs (8 channels)
+ftm_pair_impl!(Ftm0, pair: 0, even: 0, odd: 1);
+ftm_pair_impl!(Ftm0, pair: 1, even: 2, odd: 3);
+ftm_pair_impl!(Ftm0, pair: 2, even: 4, odd: 5);
+ftm_pair_impl!(Ftm0, pair: 3, even: 6, odd: 7);
+
+// FTM1: 1 pair (2 channels)
+ftm_pair_impl!(Ftm1, pair: 0, even: 0, odd: 1);
+
+// FTM2: 1 pair (mk20d7 only)
+#[cfg(feature = "mk20d7")]
+ftm_pair_impl!(Ftm2, pair: 0, even: 0, odd: 1);
 
 // =====================================================================
 // Channel Mode Enums

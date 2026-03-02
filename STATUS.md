@@ -1,6 +1,6 @@
 # mk20dx-hal: Project Status
 
-**Last updated:** 2026-03-01 (UART/SCGC semantic enums, DMA circular buffers)
+**Last updated:** 2026-03-01 (ADC multi-channel DMA scan, DMA channel linking)
 
 ---
 
@@ -231,9 +231,20 @@ Reference: K20 ref manual chapter 36 (FTM), §36.4.15 (COMBINE), §36.4.16 (DEAD
 - [x] Macro-generated implementation for each ADC instance
 - [x] ADC1 feature-gated behind `mk20d7`
 - [x] SC3 w1c hazard avoided (write() instead of modify())
+- [x] PDB-triggered continuous scanning (1-2 channels via `start_continuous_scan()`)
+  - [x] `ScanConfig` struct (channels, modulus, prescaler, multiplier)
+  - [x] `ContinuousScan` handle with `read_latest()`, `stop()`, abort-on-drop
+  - [x] PDB pre-trigger 0 + back-to-back pre-trigger 1 for 2-channel mode
+  - [x] DMA reads ADC RA into results buffer, auto-wraps via `dest_last_adjust`
+- [x] Multi-channel scanning (3+ channels via `start_multi_channel_scan()`)
+  - [x] `MultiChannelScan` handle with `read_latest()`, `stop()`, abort-on-drop
+  - [x] DMA minor loop channel linking: DMA-A reads results, links to DMA-B
+  - [x] DMA-B writes rotated mux buffer entries to SC1A (channel cycling)
+  - [x] PDB fires single pre-trigger 0 continuously; DMA handles mux rotation
+  - [x] `sc1a_dma_addr()` helper for DMA mux writes to SC1[0]
 - [ ] Hardware validation: tests in `mk20dx-testsuite/tests/adc.rs` (10 tests, internal references)
 
-Reference: K20 ref manual chapter 31 (ADC)
+Reference: K20 ref manual chapter 31 (ADC), chapter 34 (PDB)
 
 ---
 
@@ -259,6 +270,8 @@ Reference: K20 ref manual chapter 31 (ADC)
 - [x] DCHPRI byte-swapped index mapping (`ch ^ 3`)
 - [x] Default init: stall in debug, fixed priority, channel N = priority N
 - [x] mk20d7-only DMA sources feature-gated (SPI1, I2C1, FTM2, ADC1, CMP2)
+- [x] Channel linking: `configure_linked()` with `ChannelLink` enum (MinorLoop, MajorLoop, Both)
+- [x] Scatter-gather: `ScatterGatherTcd` (32-byte aligned) with `configure_scatter_gather()`, `from_config()`, `set_next()`
 - [ ] Hardware validation: tests in `mk20dx-testsuite/tests/dma.rs` (11 tests, memory-to-memory)
 
 Reference: K20 ref manual chapter 21 (eDMA), chapter 22 (DMAMUX)
@@ -500,6 +513,8 @@ Reference: K20 ref manual chapter 29 (FTFL), chapter 30 (FlexMemory)
 - [x] UART + DMA: `write_dma()`, `read_dma()` with DMAMUX routing (UART0-2 TX/RX)
 - [x] ADC + DMA: `read_dma()` continuous conversion with DMAMUX routing (ADC0, ADC1)
 - [x] Per-instance DMA source constants passed via macro parameters
+- [x] PDB driver (`src/pdb.rs`): `PdbExt` on `pac::Pdb0`, configurable prescaler/multiplier/modulus, continuous mode, pre-trigger enable/disable/delay, back-to-back mode, sequence error detection
+- [x] ADC + PDB + DMA: `start_continuous_scan()` (1-2 channels) and `start_multi_channel_scan()` (3+ channels with DMA channel linking)
 
 ---
 

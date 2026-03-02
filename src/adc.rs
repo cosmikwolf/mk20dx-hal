@@ -278,6 +278,15 @@ macro_rules! adc_impl {
                 <$PacType>::PTR as u32 + 0x10 // R[0] (RA) offset
             }
 
+            /// Return the SC1A register address for DMA mux writes.
+            ///
+            /// SC1[0] (SC1A) is at offset 0x00 from the ADC base address.
+            /// Used by multi-channel scan to let DMA write the next channel
+            /// number into SC1A between conversions.
+            pub fn sc1a_dma_addr() -> u32 {
+                <$PacType>::PTR as u32 // SC1[0] is at offset 0x00
+            }
+
             /// Start a DMA-backed multi-sample read.
             ///
             /// Configures the ADC for continuous conversion with DMA enabled.
@@ -411,6 +420,73 @@ impl<'a, const DMA_CH: u8> Drop for ContinuousScan<'a, DMA_CH> {
     }
 }
 
+/// Handle for a running multi-channel (3+) ADC scan using DMA channel linking.
+///
+/// Uses two DMA channels: DMA-A reads ADC results into the buffer, and
+/// DMA-A's minor loop link triggers DMA-B to write the next channel
+/// number into SC1A. This cycles the ADC input mux automatically.
+///
+/// Dropping this value stops the scan by disabling PDB, ADC hardware
+/// trigger, and both DMA channels.
+pub struct MultiChannelScan<'a, const DMA_A: u8, const DMA_B: u8> {
+    dma_a: &'a mut crate::dma::DmaChannel<DMA_A>,
+    dma_b: &'a mut crate::dma::DmaChannel<DMA_B>,
+    pdb: &'a mut crate::pdb::Pdb,
+    results: *const u16,
+    num_channels: usize,
+}
+
+impl<'a, const DMA_A: u8, const DMA_B: u8> MultiChannelScan<'a, DMA_A, DMA_B> {
+    /// Read the latest value for a channel index.
+    ///
+    /// Uses a volatile read since DMA writes asynchronously.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index >= num_channels`.
+    pub fn read_latest(&self, index: usize) -> u16 {
+        assert!(index < self.num_channels);
+        // SAFETY: DMA is writing to results buffer asynchronously. Volatile
+        // read ensures we get the latest value without compiler reordering.
+        unsafe { core::ptr::read_volatile(self.results.add(index)) }
+    }
+
+    /// Stop the scan and return borrowed resources.
+    pub fn stop(
+        mut self,
+    ) -> (
+        &'a mut crate::dma::DmaChannel<DMA_A>,
+        &'a mut crate::dma::DmaChannel<DMA_B>,
+        &'a mut crate::pdb::Pdb,
+    ) {
+        self.cleanup();
+        let dma_a_ptr = self.dma_a as *mut crate::dma::DmaChannel<DMA_A>;
+        let dma_b_ptr = self.dma_b as *mut crate::dma::DmaChannel<DMA_B>;
+        let pdb_ptr = self.pdb as *mut crate::pdb::Pdb;
+        // SAFETY: We need to return the references while preventing Drop.
+        // The raw pointers preserve the original 'a lifetime, and cleanup()
+        // ensures hardware is stopped before we return the references.
+        core::mem::forget(self);
+        unsafe { (&mut *dma_a_ptr, &mut *dma_b_ptr, &mut *pdb_ptr) }
+    }
+
+    fn cleanup(&mut self) {
+        // Disable PDB
+        self.pdb.disable();
+        // Disable DMA requests on both channels
+        self.dma_a.disable_request();
+        self.dma_a.clear_done();
+        self.dma_b.disable_request();
+        self.dma_b.clear_done();
+    }
+}
+
+impl<'a, const DMA_A: u8, const DMA_B: u8> Drop for MultiChannelScan<'a, DMA_A, DMA_B> {
+    fn drop(&mut self) {
+        self.cleanup();
+    }
+}
+
 macro_rules! adc_scan_impl {
     ($PacType:ty, $Instance:ty, $dma_source:expr, $pdb_channel:literal) => {
         impl Adc<$Instance> {
@@ -517,6 +593,157 @@ macro_rules! adc_scan_impl {
 
                 ContinuousScan {
                     dma_ch,
+                    pdb,
+                    results: results.as_ptr(),
+                    num_channels: num_ch,
+                }
+            }
+
+            /// Start a PDB-triggered continuous multi-channel ADC scan (3+ channels).
+            ///
+            /// Uses DMA minor loop channel linking to cycle the ADC input mux:
+            ///
+            /// 1. PDB fires pre-trigger 0 continuously at the configured rate.
+            /// 2. ADC converts the channel currently selected in SC1A.
+            /// 3. ADC completion fires a DMA request.
+            /// 4. DMA-A reads the result register (RA) into `results[i]`.
+            /// 5. DMA-A's minor loop link triggers DMA-B.
+            /// 6. DMA-B writes the next channel number from `mux_buf[i]` into SC1A.
+            /// 7. The cycle repeats continuously.
+            ///
+            /// The `mux_buf` must be pre-filled by the caller with SC1A register
+            /// values rotated by 1 position: `[ch[1], ch[2], ..., ch[N-1], ch[0]]`.
+            /// Before starting, `ch[0]` is written to SC1A. After each result read,
+            /// DMA-B queues the next channel.
+            ///
+            /// # Arguments
+            ///
+            /// * `config` — Scan configuration (channels, timing). Must have 3+
+            ///   channels.
+            /// * `results` — Buffer for conversion results (one u16 per channel).
+            /// * `mux_buf` — Scratch buffer for DMA mux writes (one u32 per channel).
+            ///   Filled automatically from `config.channels`.
+            /// * `dma_a` — DMA channel for result reads (DMAMUX → ADCx).
+            /// * `dma_b` — DMA channel for mux writes (link-triggered only).
+            /// * `pdb` — PDB driver.
+            ///
+            /// # Panics
+            ///
+            /// Panics if `config.channels.len() < 3`, or if `results` or `mux_buf`
+            /// are too small.
+            pub fn start_multi_channel_scan<'a, const DMA_A: u8, const DMA_B: u8>(
+                &'a mut self,
+                config: &ScanConfig,
+                results: &'a mut [u16],
+                mux_buf: &'a mut [u32],
+                dma_a: &'a mut crate::dma::DmaChannel<DMA_A>,
+                dma_b: &'a mut crate::dma::DmaChannel<DMA_B>,
+                pdb: &'a mut crate::pdb::Pdb,
+            ) -> MultiChannelScan<'a, DMA_A, DMA_B> {
+                let num_ch = config.channels.len();
+                assert!(num_ch >= 3);
+                assert!(results.len() >= num_ch);
+                assert!(mux_buf.len() >= num_ch);
+
+                let adc = Self::regs();
+
+                // 1. Fill mux_buf with SC1A values, rotated by 1 position.
+                //    After reading result[i], DMA-B writes mux_buf[i] = channels[(i+1) % N]
+                //    into SC1A, so the NEXT conversion uses the correct channel.
+                for i in 0..num_ch {
+                    let next_ch = config.channels[(i + 1) % num_ch];
+                    // SC1A format: bits[4:0]=ADCH, bit 5=DIFF (0), bit 6=AIEN (0)
+                    mux_buf[i] = (next_ch & 0x1F) as u32;
+                }
+
+                // 2. Enable hardware trigger mode and DMA on the ADC.
+                adc.sc2().modify(|_, w| w.adtrg()._1().dmaen()._1());
+                // Disable continuous mode — PDB triggers each conversion
+                adc.sc3().write(|w| w);
+
+                // 3. Write the first channel into SC1A to prime the pipeline.
+                // SAFETY: adch is a 5-bit field; masked to 0x1F.
+                adc.sc1(0).write(|w| unsafe {
+                    w.adch().bits(config.channels[0] & 0x1F)
+                });
+
+                // 4. Configure PDB: single pre-trigger 0, continuous mode.
+                pdb.configure(
+                    crate::pdb::TriggerSource::Software,
+                    config.prescaler,
+                    config.multiplier,
+                    config.modulus,
+                );
+                pdb.set_continuous(true);
+
+                // Pre-trigger 0: delay=0, triggers SC1A
+                pdb.set_pretrigger_delay($pdb_channel, 0, 0);
+                pdb.enable_pretrigger($pdb_channel, 0);
+                // Explicitly disable pre-trigger 1 (only using pre-trigger 0)
+                pdb.disable_pretrigger($pdb_channel, 1);
+                pdb.disable_back_to_back($pdb_channel, 1);
+
+                pdb.load_ok();
+
+                // 5. Configure DMA-A: ADC RA → results buffer (16-bit).
+                //    Minor loop links to DMA-B after each transfer.
+                let n = num_ch as u16;
+                unsafe {
+                    dma_a.configure_linked(
+                        &crate::dma::TransferConfig {
+                            source_addr: Self::result_dma_addr(),
+                            dest_addr: results.as_mut_ptr() as u32,
+                            source_size: crate::dma::TransferSize::Bits16,
+                            dest_size: crate::dma::TransferSize::Bits16,
+                            source_offset: 0,       // Fixed ADC RA address
+                            dest_offset: 2,         // Advance 2 bytes per result
+                            minor_loop_bytes: 2,    // 1 x u16 per DMA activation
+                            major_loop_count: n,
+                            source_last_adjust: 0,
+                            dest_last_adjust: -(n as i32 * 2), // Wrap destination
+                            dest_modulo: 0,
+                            auto_disable: false,    // Continuous — never stop
+                        },
+                        crate::dma::ChannelLink::MinorLoop { channel: DMA_B },
+                    );
+                }
+
+                dma_a.set_source($dma_source);
+
+                // 6. Configure DMA-B: mux_buf → SC1A (32-bit).
+                //    Triggered only by DMA-A's minor loop link (no DMAMUX source).
+                unsafe {
+                    dma_b.configure(&crate::dma::TransferConfig {
+                        source_addr: mux_buf.as_ptr() as u32,
+                        dest_addr: Self::sc1a_dma_addr(),
+                        source_size: crate::dma::TransferSize::Bits32,
+                        dest_size: crate::dma::TransferSize::Bits32,
+                        source_offset: 4,       // Advance 4 bytes per mux entry
+                        dest_offset: 0,         // Fixed SC1A address
+                        minor_loop_bytes: 4,    // 1 x u32 per DMA activation
+                        major_loop_count: n,
+                        source_last_adjust: -(n as i32 * 4), // Wrap source
+                        dest_last_adjust: 0,
+                        dest_modulo: 0,
+                        auto_disable: false,    // Continuous — never stop
+                    });
+                }
+
+                // DMA-B has no DMAMUX source — it is purely link-triggered.
+                // Disable any previous DMAMUX routing on this channel.
+                dma_b.disable_source();
+
+                // Enable hardware requests on both channels.
+                dma_a.enable_request();
+                dma_b.enable_request();
+
+                // 7. Enable PDB and trigger.
+                pdb.enable();
+                pdb.software_trigger();
+
+                MultiChannelScan {
+                    dma_a,
+                    dma_b,
                     pdb,
                     results: results.as_ptr(),
                     num_channels: num_ch,

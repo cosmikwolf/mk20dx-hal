@@ -1,6 +1,6 @@
 # mk20dx-hal: Project Status
 
-**Last updated:** 2026-02-28 (DSPI PUSHR DMA and MCR control)
+**Last updated:** 2026-03-01 (UART/SCGC semantic enums, DMA circular buffers)
 
 ---
 
@@ -30,10 +30,10 @@ The `mk20dx-pac` crates are mature (Phase 5 complete, Phase 6 publishing in prog
 
 | PAC Crate | Compiles | Correctness Patches | Ergonomics Patches | Validation |
 |-----------|----------|--------------------|--------------------|------------|
-| `mk20d5` | OK (0 errors) | 2 applied (SIM, FMC) | 15 applied (DMAMUX enums, DMA TCD clusters, 12 common semantic enum patches, 1 variant-specific) | 44 peripherals verified, 0 address mismatches |
-| `mk20d7` | OK (0 errors) | 0 needed (clean SVD) | 16 applied (DMAMUX enums, DMA TCD clusters, 12 common semantic enum patches, 5 variant-specific) | 48 peripherals verified, 0 address mismatches |
+| `mk20d5` | OK (0 errors) | 2 applied (SIM, FMC) | 19 applied (DMAMUX enums, DMA TCD clusters, 17 common semantic enum patches) | 44 peripherals verified, 0 address mismatches |
+| `mk20d7` | OK (0 errors) | 0 needed (clean SVD) | 25 applied (DMAMUX enums, DMA TCD clusters, 17 common semantic enum patches, 6 variant-specific) | 48 peripherals verified, 0 address mismatches |
 
-Semantic enum patches now provide named enums across PORT MUX, FTM, ADC, MCG, SIM SOPT2, SIM SCGC, DMA ATTR, SPI, and UART fields — the HAL uses these directly instead of raw bit patterns.
+Semantic enum patches now provide named enums across PORT (MUX + bitfields), FTM, ADC, MCG, SIM SOPT2, SIM SCGC, DMA ATTR, SPI, and UART fields — the HAL uses these directly instead of raw bit patterns.
 
 PAC is dual-licensed MIT/Apache-2.0, has README.md, and Cargo.toml metadata is ready for publishing.
 
@@ -252,6 +252,9 @@ Reference: K20 ref manual chapter 31 (ADC)
 - [x] Status: `is_complete()`, `has_error()`, `is_active()`, `error_status()`
 - [x] Flag management: `clear_done()`, `clear_interrupt()`, `clear_error()`
 - [x] Interrupts: `enable_interrupt()`, `disable_interrupt()`, `enable_error_interrupt()`, `disable_error_interrupt()`
+- [x] Circular buffers: `dest_modulo` (DMOD field) for hardware address wrapping at 2^N byte boundaries
+- [x] Auto-disable control: `auto_disable` flag (DREQ bit) for continuous/circular transfers
+- [x] TCD readback: `current_dest_addr()` for tracking DMA write position
 - [x] Convenience: `configure_memcpy()`, `configure_peripheral_read()`, `configure_peripheral_write()`
 - [x] DCHPRI byte-swapped index mapping (`ch ^ 3`)
 - [x] Default init: stall in debug, fixed priority, channel N = priority N

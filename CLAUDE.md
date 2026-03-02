@@ -29,7 +29,7 @@ Both are ARM Cortex-M4 (no FPU), target `thumbv7em-none-eabi`.
 
 ## Sibling Project: mk20dx-pac
 
-The PAC lives at `../mk20dx-pac/`. It is mature (Phase 5 complete, Phase 6 publishing in progress), validated against `kinetis.h`, and both variants compile cleanly. Ergonomics patches provide semantic enum names across PORT MUX, FTM, ADC, MCG, SIM, and DMA ATTR fields — the HAL can use these directly instead of raw bit patterns.
+The PAC lives at `../mk20dx-pac/`. It is mature (Phase 5 complete, Phase 6 publishing in progress), validated against `kinetis.h`, and both variants compile cleanly. Ergonomics patches provide semantic enum names across PORT, FTM, ADC, MCG, SIM, DMA ATTR, SPI, UART, and SIM SCGC fields — the HAL uses these directly instead of raw bit patterns.
 
 Key PAC documentation:
 - `../mk20dx-pac/CLAUDE.md` — PAC project guide, build commands, SVD patching conventions
@@ -70,16 +70,26 @@ mk20dx-hal/
 │   ├── memory_mk20d5.x    # Linker script for Teensy 3.0
 │   └── memory_mk20d7.x    # Linker script for Teensy 3.1/3.2
 ├── src/
-│   ├── lib.rs              # Feature gates, PAC re-export, module declarations
+│   ├── lib.rs              # Feature gates, PAC re-export, interrupt module, module declarations
 │   ├── prelude.rs          # Glob import of commonly-used traits + extension traits
 │   ├── adc.rs              # AdcExt, ADC driver (HAL-specific, no standard trait)
 │   ├── clocks.rs           # McgExt, MCG+SIM clock configuration, ClockSpeed presets, Clocks token
+│   ├── cmp.rs              # CmpExt, analog comparator (CMP0/1/2)
+│   ├── crc_module.rs       # CrcExt, hardware CRC accelerator
+│   ├── dac.rs              # DacExt, 12-bit DAC (mk20d7 only)
 │   ├── delay.rs            # DelayNs via SysTick
 │   ├── dma.rs              # DmaExt, eDMA+DMAMUX driver (HAL-specific)
+│   ├── eeprom.rs           # EEPROM via FlexRAM/FlexMemory
+│   ├── flash.rs            # FlashExt, FTFL flash memory driver
 │   ├── flash_config.rs     # 16-byte flash configuration field at 0x400
 │   ├── gpio.rs             # GpioExt, pin type-states, PORT mux, embedded-hal digital
 │   ├── i2c.rs              # I2cExt, I2C driver, embedded-hal I2c
-│   ├── pwm.rs              # FtmExt, FTM-based PWM, embedded-hal SetDutyCycle
+│   ├── llwu.rs             # LlwuExt, low-leakage wakeup unit
+│   ├── lptmr.rs            # LptmrExt, low-power timer
+│   ├── pdb.rs              # PdbExt, programmable delay block
+│   ├── power.rs            # SmcExt, low-power mode control (Wait/Stop/VLPR/VLPS/LLS/VLLS)
+│   ├── pwm.rs              # FtmExt, FTM-based PWM, input capture, output compare, quadrature
+│   ├── rtc.rs              # RtcExt, real-time clock
 │   ├── spi.rs              # SpiExt, DSPI driver, embedded-hal SpiBus, PUSHR DMA
 │   ├── time.rs             # Re-exports fugit types for frequencies/durations
 │   ├── timer.rs            # PitExt, PIT timer abstractions
@@ -126,18 +136,18 @@ let dp = pac::Peripherals::take().unwrap();
 let cp = cortex_m::Peripherals::take().unwrap();
 
 // Disable watchdog (consumes WDOG peripheral)
-dp.WDOG.disable();
+dp.wdog.disable();
 
 // Configure clocks: MCG → PLL → 72 MHz (consumes MCG + OSC, borrows SIM)
-let clocks = dp.MCG.constrain().freeze(dp.OSC, &dp.SIM);
+let clocks = dp.mcg.constrain().freeze(dp.osc, &dp.sim);
 
 // Or use an overclock preset (mk20d7 only):
 // use mk20dx_hal::clocks::ClockSpeed;
-// let clocks = dp.MCG.constrain().freeze_at(ClockSpeed::Mhz96, dp.OSC, &dp.SIM);
+// let clocks = dp.mcg.constrain().freeze_at(ClockSpeed::Mhz96, dp.osc, &dp.sim);
 
 // Split GPIO ports (consumes PORT + GPIO peripherals, borrows SIM for clock gating)
-let pins_a = dp.PORTA.split(dp.PTA, &dp.SIM);
-let pins_c = dp.PORTC.split(dp.PTC, &dp.SIM);
+let pins_a = dp.porta.split(dp.pta, &dp.sim);
+let pins_c = dp.portc.split(dp.ptc, &dp.sim);
 
 // SysTick delay
 let mut delay = Delay::new(cp.SYST, &clocks);

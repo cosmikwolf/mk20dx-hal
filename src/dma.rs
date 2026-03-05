@@ -391,7 +391,7 @@ impl<const CH: u8> DmaChannel<CH> {
         // SAFETY: source is a 6-bit field (DmaSource masks to 0x3F).
         dmamux.chcfg(ch).write(|w| {
             unsafe { w.source().bits(source.0) }
-                .enbl()._1()
+                .enbl().enabled()
         });
     }
 
@@ -461,7 +461,7 @@ impl<const CH: u8> DmaChannel<CH> {
         // Current major iteration count (no channel linking)
         tcd.citer_elinkno().write(|w| {
             unsafe { w.citer().bits(config.major_loop_count) }
-                .elink()._0()
+                .elink().disabled()
         });
 
         // Destination last address adjustment (signed i32 → u32)
@@ -469,15 +469,15 @@ impl<const CH: u8> DmaChannel<CH> {
 
         // Control/status: optionally auto-disable request on major complete
         if config.auto_disable {
-            tcd.csr().write(|w| w.dreq()._1());
+            tcd.csr().write(|w| w.dreq().disable_on_complete());
         } else {
-            tcd.csr().write(|w| w.dreq()._0());
+            tcd.csr().write(|w| w.dreq().no_disable());
         }
 
         // Beginning iteration count (must equal CITER when loading a new TCD)
         tcd.biter_elinkno().write(|w| {
             unsafe { w.biter().bits(config.major_loop_count) }
-                .elink()._0()
+                .elink().disabled()
         });
     }
 
@@ -546,21 +546,21 @@ impl<const CH: u8> DmaChannel<CH> {
             // Use elinkyes variants: 9-bit count, 4-bit link channel, ELINK=1
             tcd.citer_elinkyes().write(|w| {
                 unsafe { w.citer().bits(config.major_loop_count).linkch().bits(minor_ch) }
-                    .elink()._1()
+                    .elink().enabled()
             });
             tcd.biter_elinkyes().write(|w| {
                 unsafe { w.biter().bits(config.major_loop_count).linkch().bits(minor_ch) }
-                    .elink()._1()
+                    .elink().enabled()
             });
         } else {
             // No minor linking — use elinkno variants
             tcd.citer_elinkno().write(|w| {
                 unsafe { w.citer().bits(config.major_loop_count) }
-                    .elink()._0()
+                    .elink().disabled()
             });
             tcd.biter_elinkno().write(|w| {
                 unsafe { w.biter().bits(config.major_loop_count) }
-                    .elink()._0()
+                    .elink().disabled()
             });
         }
 
@@ -569,13 +569,13 @@ impl<const CH: u8> DmaChannel<CH> {
         if major_link {
             tcd.csr().write(|w| {
                 let w = unsafe { w.majorlinkch().bits(major_ch) }
-                    .majorelink()._1();
-                if dreq { w.dreq()._1() } else { w.dreq()._0() }
+                    .majorelink().enabled();
+                if dreq { w.dreq().disable_on_complete() } else { w.dreq().no_disable() }
             });
         } else if dreq {
-            tcd.csr().write(|w| w.dreq()._1());
+            tcd.csr().write(|w| w.dreq().disable_on_complete());
         } else {
-            tcd.csr().write(|w| w.dreq()._0());
+            tcd.csr().write(|w| w.dreq().no_disable());
         }
     }
 
@@ -608,7 +608,7 @@ impl<const CH: u8> DmaChannel<CH> {
         tcd.citer_elinkno().write(|w| unsafe { w.bits(first_tcd.citer) });
         tcd.dlastsga().write(|w| unsafe { w.dlastsga().bits(first_tcd.dlastsga) });
         // Set ESG=1 in CSR, overriding whatever the TCD struct had
-        tcd.csr().write(|w| w.esg()._1());
+        tcd.csr().write(|w| w.esg().enabled());
         tcd.biter_elinkno().write(|w| unsafe { w.bits(first_tcd.biter) });
     }
 
@@ -656,30 +656,30 @@ impl<const CH: u8> DmaChannel<CH> {
     /// most recent error.
     pub fn error_status(&self) -> Option<DmaError> {
         let es = dma_regs().es().read();
-        if !es.vld().is_1() {
+        if !es.vld().is_valid() {
             return None;
         }
         if es.errchn().bits() != CH {
             return None;
         }
 
-        if es.sae().is_1() {
+        if es.sae().is_error() {
             Some(DmaError::SourceAddressError)
-        } else if es.soe().is_1() {
+        } else if es.soe().is_error() {
             Some(DmaError::SourceOffsetError)
-        } else if es.dae().is_1() {
+        } else if es.dae().is_error() {
             Some(DmaError::DestAddressError)
-        } else if es.doe().is_1() {
+        } else if es.doe().is_error() {
             Some(DmaError::DestOffsetError)
-        } else if es.nce().is_1() {
+        } else if es.nce().is_error() {
             Some(DmaError::NbytesConfigError)
-        } else if es.sge().is_1() {
+        } else if es.sge().is_error() {
             Some(DmaError::ScatterGatherError)
-        } else if es.sbe().is_1() {
+        } else if es.sbe().is_error() {
             Some(DmaError::SourceBusError)
-        } else if es.dbe().is_1() {
+        } else if es.dbe().is_error() {
             Some(DmaError::DestBusError)
-        } else if es.ecx().is_1() {
+        } else if es.ecx().is_cancelled() {
             Some(DmaError::Cancelled)
         } else {
             None
@@ -707,12 +707,12 @@ impl<const CH: u8> DmaChannel<CH> {
 
     /// Enable interrupt on major loop completion (CSR.INTMAJOR).
     pub fn enable_interrupt(&mut self) {
-        dma_regs().tcd(CH as usize).csr().modify(|_, w| w.intmajor()._1());
+        dma_regs().tcd(CH as usize).csr().modify(|_, w| w.intmajor().enabled());
     }
 
     /// Disable interrupt on major loop completion.
     pub fn disable_interrupt(&mut self) {
-        dma_regs().tcd(CH as usize).csr().modify(|_, w| w.intmajor()._0());
+        dma_regs().tcd(CH as usize).csr().modify(|_, w| w.intmajor().disabled());
     }
 
     /// Enable error interrupt for this channel (set EEI bit via SEEI).
@@ -917,6 +917,54 @@ impl<'a, const CH: u8> Drop for DmaTransfer<'a, CH> {
     }
 }
 
+// ----- Dual-Channel DMA Read Transfer Handle -----
+
+/// A safe handle for an in-progress dual-channel DMA read transfer.
+///
+/// Used by SPI [`read_dma()`](crate::spi::Spi::read_dma) which requires both
+/// a TX channel (sending dummy data to generate clocks) and an RX channel
+/// (capturing received bytes). Both channels are kept borrowed until the
+/// transfer completes.
+///
+/// **Drop behavior:** Dropping this value aborts both DMA channels by
+/// disabling hardware requests and clearing status flags.
+pub struct DmaReadTransfer<'a, const TX_CH: u8, const RX_CH: u8> {
+    pub(crate) tx_channel: &'a mut DmaChannel<TX_CH>,
+    pub(crate) rx_channel: &'a mut DmaChannel<RX_CH>,
+}
+
+impl<const TX_CH: u8, const RX_CH: u8> DmaReadTransfer<'_, TX_CH, RX_CH> {
+    /// Block until the read transfer completes or errors.
+    ///
+    /// Waits for the RX channel to complete (it finishes after TX since
+    /// each RX follows its corresponding TX in the SPI pipeline).
+    /// Both channels are cleaned up by the Drop impl.
+    pub fn wait(self) -> Result<(), DmaError> {
+        loop {
+            if self.rx_channel.has_error() {
+                return Err(self.rx_channel.error_status().unwrap_or(DmaError::Cancelled));
+            }
+            if self.tx_channel.has_error() {
+                return Err(self.tx_channel.error_status().unwrap_or(DmaError::Cancelled));
+            }
+            if self.rx_channel.is_complete() {
+                return Ok(());
+            }
+        }
+    }
+}
+
+impl<const TX_CH: u8, const RX_CH: u8> Drop for DmaReadTransfer<'_, TX_CH, RX_CH> {
+    fn drop(&mut self) {
+        self.tx_channel.disable_request();
+        self.tx_channel.clear_done();
+        self.tx_channel.clear_error();
+        self.rx_channel.disable_request();
+        self.rx_channel.clear_done();
+        self.rx_channel.clear_error();
+    }
+}
+
 // ----- DMA Channels -----
 
 /// All DMA channels returned by [`DmaExt::split`].
@@ -978,7 +1026,7 @@ impl DmaExt for pac::Dma {
         let dmamux = dmamux_regs();
 
         // Configure CR: stall in debug mode, fixed priority, EMLM=0
-        dma.cr().write(|w| w.edbg()._1());
+        dma.cr().write(|w| w.edbg().halt_on_debug());
 
         // Set default channel priorities: channel N gets priority N, preemptable
         for ch in 0..NUM_CHANNELS as u8 {
@@ -986,7 +1034,7 @@ impl DmaExt for pac::Dma {
             // chpri field. dchpri_index handles the byte-swap addressing.
             dma.dchpri(dchpri_index(ch)).write(|w| {
                 unsafe { w.chpri().bits(ch) }
-                    .ecp()._1()
+                    .ecp().enabled()
             });
         }
 

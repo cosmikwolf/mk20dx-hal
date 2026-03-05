@@ -24,7 +24,7 @@ impl WdogExt for pac::Wdog {
             }
 
             // Disable the watchdog — must happen within 256 bus clocks of unlock
-            self.stctrlh().write(|w| w.wdogen()._0());
+            self.stctrlh().write(|w| w.wdogen().disabled());
         });
     }
 }

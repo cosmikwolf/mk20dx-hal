@@ -104,9 +104,9 @@ impl Mcg {
 
             // -- Step 0: Set SIM clock dividers before switching clock source --
             sim.clkdiv1().write(|w| {
-                w.outdiv1()._0000()  // ÷1 → 48 MHz core
-                 .outdiv2()._0000()  // ÷1 → 48 MHz bus
-                 .outdiv4()._0001()  // ÷2 → 24 MHz flash
+                w.outdiv1().div1()  // ÷1 → 48 MHz core
+                 .outdiv2().div1()  // ÷1 → 48 MHz bus
+                 .outdiv4().div2()  // ÷2 → 24 MHz flash
             });
 
             // -- Step 1: Enable external oscillator --
@@ -120,21 +120,22 @@ impl Mcg {
             // SAFETY: range0 is a 2-bit field; value 2 selects very high frequency range.
             unsafe {
                 mcg.c2().write(|w| {
-                    w.range0().bits(2)   // Very high frequency range (8-32 MHz)
-                     .erefs0()._1()      // Oscillator requested (not external clock)
-                     .hgo0()._0()        // Low-power oscillator mode
+                    w.range0().bits(2)      // Very high frequency range (8-32 MHz)
+                     .erefs0().oscillator() // Oscillator requested (not external clock)
+                     .hgo0().low_power()    // Low-power oscillator mode
                 });
             }
 
             mcg.c1().write(|w| {
+                // SAFETY: frdiv is a 3-bit field; 4 = 0b100 selects ÷512 for high-range oscillator.
+                let w = unsafe { w.frdiv().bits(4) };
                 w.clks().external()  // Select external reference clock
-                 .frdiv()._100()     // Divide by 512 (for high-range oscillator)
-                 .irefs()._0()       // External reference
+                 .irefs().external() // External FLL reference
             });
 
             while mcg.s().read().oscinit0().bit_is_clear() {}
-            while !mcg.s().read().clkst().is_10() {}
-            while mcg.s().read().irefst().is_1() {}
+            while !mcg.s().read().clkst().is_external() {}
+            while mcg.s().read().irefst().is_internal() {}
 
             // -- Step 3: FBE → PBE (PLL Bypassed External) --
             // PRDIV=7 → 16/(7+1)=2 MHz, VDIV=0 → 2×(0+24)=48 MHz
@@ -143,15 +144,15 @@ impl Mcg {
             unsafe {
                 mcg.c5().write(|w| w.prdiv0().bits(7));   // ÷8 → 2 MHz
                 mcg.c6().write(|w| w.vdiv0().bits(0)      // ×24 → 48 MHz
-                                    .plls()._1());         // Select PLL
+                                    .plls()._1());         // Select PLL (no semantic enum for PLLS)
             }
 
-            while !mcg.s().read().pllst().is_1() {}
-            while !mcg.s().read().lock0().is_1() {}
+            while !mcg.s().read().pllst().is_pll() {}
+            while !mcg.s().read().lock0().is_locked() {}
 
             // -- Step 4: PBE → PEE (PLL Engaged External) --
             mcg.c1().modify(|_, w| w.clks().fll_pll());
-            while !mcg.s().read().clkst().is_11() {}
+            while !mcg.s().read().clkst().is_pll() {}
 
             Clocks {
                 core_clk: Hertz::from_raw(48_000_000),
@@ -215,25 +216,26 @@ impl Mcg {
         // SAFETY: range0 is a 2-bit field; value 2 selects very high frequency range.
         unsafe {
             mcg.c2().write(|w| {
-                w.range0().bits(2)   // Very high frequency range (8-32 MHz)
-                 .erefs0()._1()      // Oscillator requested (not external clock)
-                 .hgo0()._0()        // Low-power oscillator mode
+                w.range0().bits(2)      // Very high frequency range (8-32 MHz)
+                 .erefs0().oscillator() // Oscillator requested (not external clock)
+                 .hgo0().low_power()    // Low-power oscillator mode
             });
         }
 
         // Switch to external reference clock, set FRDIV for 16 MHz ÷ 512 = 31.25 kHz
         mcg.c1().write(|w| {
+            // SAFETY: frdiv is a 3-bit field; 4 = 0b100 selects ÷512 for high-range oscillator.
+            let w = unsafe { w.frdiv().bits(4) };
             w.clks().external()  // Select external reference clock
-             .frdiv()._100()     // Divide by 512 (for high-range oscillator)
-             .irefs()._0()       // External reference
+             .irefs().external() // External FLL reference
         });
 
         // Wait for oscillator to initialize
         while mcg.s().read().oscinit0().bit_is_clear() {}
         // Wait for clock source to switch to external reference
-        while !mcg.s().read().clkst().is_10() {}
+        while !mcg.s().read().clkst().is_external() {}
         // Wait for FLL reference to switch to external
-        while mcg.s().read().irefst().is_1() {}
+        while mcg.s().read().irefst().is_internal() {}
 
         // -- Step 3: FBE → PBE (PLL Bypassed External) --
         // Configure PLL: reference_freq = 16 MHz ÷ (PRDIV + 1)
@@ -243,20 +245,20 @@ impl Mcg {
         unsafe {
             mcg.c5().write(|w| w.prdiv0().bits(prdiv));
             mcg.c6().write(|w| w.vdiv0().bits(vdiv)
-                                .plls()._1());  // Select PLL
+                                .plls()._1());  // Select PLL (no semantic enum for PLLS)
         }
 
         // Wait for PLL to be selected as PLLS clock source
-        while !mcg.s().read().pllst().is_1() {}
+        while !mcg.s().read().pllst().is_pll() {}
         // Wait for PLL to lock
-        while !mcg.s().read().lock0().is_1() {}
+        while !mcg.s().read().lock0().is_locked() {}
 
         // -- Step 4: PBE → PEE (PLL Engaged External) --
         // Switch CLKS to FLL/PLL output (which is PLL since PLLS=1)
         mcg.c1().modify(|_, w| w.clks().fll_pll());
 
         // Wait for clock source to switch to PLL
-        while !mcg.s().read().clkst().is_11() {}
+        while !mcg.s().read().clkst().is_pll() {}
 
         Clocks {
             core_clk: Hertz::from_raw(core_hz),
@@ -336,36 +338,36 @@ impl Clocks {
         // Switch CLKS from FLL/PLL output to external reference
         mcg.c1().modify(|_, w| w.clks().external());
         // Wait for external clock source
-        while !mcg.s().read().clkst().is_10() {}
+        while !mcg.s().read().clkst().is_external() {}
 
         // -- Step 2: PBE → FBE --
         // Deselect PLL
         mcg.c6().modify(|_, w| w.plls()._0());
         // Wait for FLL to be selected
-        while mcg.s().read().pllst().is_1() {}
+        while mcg.s().read().pllst().is_pll() {}
 
         // -- Step 3: FBE → FBI --
         // Switch to internal reference clock
-        mcg.c1().modify(|_, w| w.clks().internal().irefs()._1());
+        mcg.c1().modify(|_, w| w.clks().internal().irefs().internal());
         // Wait for internal reference
-        while !mcg.s().read().clkst().is_01() {}
-        while !mcg.s().read().irefst().is_1() {}
+        while !mcg.s().read().clkst().is_internal() {}
+        while !mcg.s().read().irefst().is_internal() {}
 
         // Select fast internal reference clock (~4 MHz undivided)
-        mcg.c2().modify(|_, w| w.ircs()._1());
+        mcg.c2().modify(|_, w| w.ircs().fast_irc());
         // Wait for fast IRC selected
-        while !mcg.s().read().ircst().is_1() {}
+        while !mcg.s().read().ircst().is_fast() {}
 
         // -- Step 4: FBI → BLPI --
         // Set LP bit to disable FLL in bypass mode
-        mcg.c2().modify(|_, w| w.lp()._1());
+        mcg.c2().modify(|_, w| w.lp().fll_pll_disabled());
 
         // -- Step 5: Adjust SIM dividers for VLPR limits --
         // Fast IRC = 4 MHz. Need core ≤ 4 MHz, bus ≤ 1 MHz, flash ≤ 1 MHz
         sim.clkdiv1().write(|w| {
-            w.outdiv1()._0000()  // ÷1 → 4 MHz core
-             .outdiv2()._0011()  // ÷4 → 1 MHz bus
-             .outdiv4()._0011()  // ÷4 → 1 MHz flash
+            w.outdiv1().div1()  // ÷1 → 4 MHz core
+             .outdiv2().div4()  // ÷4 → 1 MHz bus
+             .outdiv4().div4()  // ÷4 → 1 MHz flash
         });
 
         let blpi_clocks = BlpiClocks {
@@ -388,14 +390,14 @@ impl Clocks {
 
         // -- Step 1: BLPI → FBI --
         // Clear LP bit to re-enable FLL
-        mcg.c2().modify(|_, w| w.lp()._0());
+        mcg.c2().modify(|_, w| w.lp().fll_pll_active());
 
         // -- Step 2: FBI → FBE --
         // Switch to external reference
-        mcg.c1().modify(|_, w| w.clks().external().irefs()._0());
+        mcg.c1().modify(|_, w| w.clks().external().irefs().external());
         // Wait for external reference
-        while !mcg.s().read().clkst().is_10() {}
-        while mcg.s().read().irefst().is_1() {}
+        while !mcg.s().read().clkst().is_external() {}
+        while mcg.s().read().irefst().is_internal() {}
 
         // -- Step 3: Restore SIM dividers before PLL engagement --
         // SAFETY: Restoring the exact CLKDIV1 value saved during enter_blpi().
@@ -405,14 +407,14 @@ impl Clocks {
         // Re-enable PLL
         mcg.c6().modify(|_, w| w.plls()._1());
         // Wait for PLL selected
-        while !mcg.s().read().pllst().is_1() {}
+        while !mcg.s().read().pllst().is_pll() {}
         // Wait for PLL lock
-        while !mcg.s().read().lock0().is_1() {}
+        while !mcg.s().read().lock0().is_locked() {}
 
         // -- Step 5: PBE → PEE --
         mcg.c1().modify(|_, w| w.clks().fll_pll());
         // Wait for PLL output as system clock
-        while !mcg.s().read().clkst().is_11() {}
+        while !mcg.s().read().clkst().is_pll() {}
 
         Clocks {
             core_clk: saved.core_clk,

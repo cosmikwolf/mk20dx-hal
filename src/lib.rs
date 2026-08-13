@@ -32,6 +32,23 @@ pub mod interrupt {
     pub use crate::pac::Interrupt::*;
 }
 
+/// Re-exports that complete the `#[rtic::app(device = ...)]` contract.
+///
+/// RTIC resolves three things from whatever path is given as `device`:
+/// `interrupt` (the module above), `Peripherals`, and `NVIC_PRIO_BITS`
+/// (which it uses to compute BASEPRI ceilings for shared resources).
+///
+/// The PAC has the latter two but not the module; this crate has the
+/// module but, until now, not the latter two. Neither alone satisfied
+/// the contract, so an RTIC application had to hand-roll a join module.
+/// With these, `device = mk20dx_hal` works directly.
+///
+/// ```ignore
+/// #[rtic::app(device = mk20dx_hal, dispatchers = [CAN0_ORed_Message_buffer])]
+/// mod app { /* ... */ }
+/// ```
+pub use crate::pac::{Peripherals, NVIC_PRIO_BITS};
+
 pub mod adc;
 pub mod clocks;
 pub mod cmp;

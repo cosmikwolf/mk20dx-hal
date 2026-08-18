@@ -6,7 +6,7 @@ description = "Hardware Abstraction Layer for MK20DX128/MK20DX256 (Teensy 3.0/3.
 license = "MIT OR Apache-2.0"
 rust-version = "1.81"
 categories = ["embedded", "hardware-support", "no-std"]
-keywords = ["arm", "cortex-m", "teensy", "kinetis", "nxp", "hal"]
+keywords = ["arm", "cortex-m", "teensy", "kinetis", "hal"]
 
 [dependencies]
 cortex-m = "0.7"

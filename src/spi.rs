@@ -168,11 +168,12 @@ macro_rules! spi_impl {
                 let (br, pbr, dbr) = calc_baud(bus_clk, config.baudrate.raw());
 
                 // 1. Halt + Master mode + Enable module clocks, PCS0 inactive high
+                // PCSIS is a per-line bitmask: bit x sets the inactive state of PCSx.
                 spi.mcr().write(|w| {
                     w.mstr().master()
                      .halt().halted()
                      .mdis().enabled()
-                     .pcsis()._1()
+                     .pcsis().set(0b00_0001)
                 });
 
                 // 2. Flush FIFOs (CLR_TXF/CLR_RXF are self-clearing)
@@ -237,10 +238,11 @@ macro_rules! spi_impl {
                 spi.sr().write(|w| w.tfff().not_full());
 
                 // Push data with PCS0 asserted, CTAR0
+                // PCS is a per-line bitmask: bit x asserts PCSx for this transfer.
                 // SAFETY: txdata is a 16-bit field; u8 as u16 fits.
                 spi.$pushr_fn().write(|w| unsafe {
                     w.txdata().bits(byte as u16)
-                     .pcs()._1()
+                     .pcs().set(0b00_0001)
                 });
 
                 // Wait for RX FIFO data
@@ -543,9 +545,10 @@ mod async_impl {
                     spi.sr().write(|w| w.tfff().not_full());
 
                     // Push data with PCS0 asserted, CTAR0
+                    // PCS is a per-line bitmask: bit x asserts PCSx for this transfer.
                     // SAFETY: txdata is a 16-bit field; u8 as u16 fits.
                     spi.$pushr_fn().write(|w| unsafe {
-                        w.txdata().bits(byte as u16).pcs()._1()
+                        w.txdata().bits(byte as u16).pcs().set(0b00_0001)
                     });
 
                     // Enable TCF interrupt and await transfer complete

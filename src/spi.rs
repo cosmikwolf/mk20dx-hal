@@ -535,7 +535,7 @@ mod async_impl {
     }
 
     macro_rules! spi_async_impl {
-        ($Instance:ty, $PacType:ty, $pushr_fn:ident, $waker:expr) => {
+        ($Instance:ty, $PacType:ty, $pushr_fn:ident, $waker:expr, $irq:expr) => {
             impl Spi<$Instance> {
                 async fn transfer_byte_async(byte: u8) -> Result<u8, Error> {
                     let spi = Self::regs();
@@ -544,23 +544,39 @@ mod async_impl {
                     while spi.sr().read().tfff().is_full() {}
                     spi.sr().write(|w| w.tfff().not_full());
 
+                    // Clear stale TCF and pending SPI0 IRQ before pushing new data.
+                    // Prevents the ISR from firing for a previous transfer's TCF.
+                    spi.sr().write(|w| w.tcf().complete());
+                    cortex_m::peripheral::NVIC::unpend($irq);
+
                     // Push data with no hardware PCS assertion (GPIO CS is used instead).
                     // SAFETY: txdata is a 16-bit field; u8 as u16 fits.
                     spi.$pushr_fn().write(|w| unsafe {
                         w.txdata().bits(byte as u16)
                     });
 
-                    // Enable TCF interrupt and await transfer complete
-                    spi.rser().modify(|_, w| w.tcf_re().enabled());
+                    // Await transfer complete via TCF interrupt.
+                    // TCF_RE is enabled INSIDE poll_fn, AFTER waker registration,
+                    // so the ISR always has a valid waker to wake.
+                    let mut tcf_re_enabled = false;
                     core::future::poll_fn(|cx| {
                         $waker.register(cx.waker());
-                        // Check if TCF_RE is disabled — means ISR already fired
-                        if spi.rser().read().tcf_re().is_disabled() {
-                            core::task::Poll::Ready(())
-                        } else if spi.sr().read().tcf().is_complete() {
-                            // Race: TCF set but ISR hasn't run yet
+
+                        if !tcf_re_enabled {
+                            spi.rser().modify(|_, w| w.tcf_re().enabled());
+                            tcf_re_enabled = true;
+                            // DSB ensures RSER write reaches the peripheral before
+                            // we read SR — prevents reordering that could miss TCF.
+                            cortex_m::asm::dsb();
+                        }
+
+                        if spi.sr().read().tcf().is_complete() {
+                            // Transfer done — handle inline
                             spi.sr().write(|w| w.tcf().complete());
                             spi.rser().modify(|_, w| w.tcf_re().disabled());
+                            core::task::Poll::Ready(())
+                        } else if spi.rser().read().tcf_re().is_disabled() {
+                            // ISR already fired (cleared TCF and disabled TCF_RE)
                             core::task::Poll::Ready(())
                         } else {
                             core::task::Poll::Pending
@@ -571,13 +587,17 @@ mod async_impl {
                     // Check for RX overflow
                     if spi.sr().read().rfof().is_overflow() {
                         spi.sr().write(|w| w.rfof().overflow());
-                        spi.sr().write(|w| w.rfdf().not_empty());
                         let _ = spi.popr().read();
+                        spi.sr().write(|w| w.rfdf().not_empty());
                         return Err(Error::Overrun);
                     }
 
+                    // Read POPR BEFORE clearing RFDF — order matters.
+                    // Clearing RFDF first causes re-assertion (FIFO non-empty),
+                    // leaving stale state for the next transfer.
+                    let data = spi.popr().read().rxdata().bits() as u8;
                     spi.sr().write(|w| w.rfdf().not_empty());
-                    Ok(spi.popr().read().rxdata().bits() as u8)
+                    Ok(data)
                 }
             }
 
@@ -629,9 +649,9 @@ mod async_impl {
         };
     }
 
-    spi_async_impl!(Spi0, pac::Spi0, spi0_pushr, SPI0_WAKER);
+    spi_async_impl!(Spi0, pac::Spi0, spi0_pushr, SPI0_WAKER, pac::Interrupt::SPI0);
     #[cfg(feature = "mk20d7")]
-    spi_async_impl!(Spi1, pac::Spi1, spi1_pushr, SPI1_WAKER);
+    spi_async_impl!(Spi1, pac::Spi1, spi1_pushr, SPI1_WAKER, pac::Interrupt::SPI1);
 }
 
 #[cfg(feature = "async")]

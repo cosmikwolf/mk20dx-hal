@@ -167,13 +167,14 @@ macro_rules! spi_impl {
                 let spi = Self::regs();
                 let (br, pbr, dbr) = calc_baud(bus_clk, config.baudrate.raw());
 
-                // 1. Halt + Master mode + Enable module clocks, PCS0 inactive high
+                // 1. Halt + Master mode + Enable module clocks, all PCS inactive high.
                 // PCSIS is a per-line bitmask: bit x sets the inactive state of PCSx.
+                // PCSIS = 0x3F matches the Teensy SPI library: SPI_MCR_PCSIS(0x3F).
                 spi.mcr().write(|w| {
                     w.mstr().master()
                      .halt().halted()
                      .mdis().enabled()
-                     .pcsis().set(0b00_0001)
+                     .pcsis().set(0x3F)
                 });
 
                 // 2. Flush FIFOs (CLR_TXF/CLR_RXF are self-clearing)
@@ -237,12 +238,11 @@ macro_rules! spi_impl {
                 // Clear TFFF (w1c)
                 spi.sr().write(|w| w.tfff().not_full());
 
-                // Push data with PCS0 asserted, CTAR0
-                // PCS is a per-line bitmask: bit x asserts PCSx for this transfer.
+                // Push data with no hardware PCS assertion (GPIO CS is used instead).
+                // Matching the Teensy SPI library: `PUSHR = data` with PCS=0.
                 // SAFETY: txdata is a 16-bit field; u8 as u16 fits.
                 spi.$pushr_fn().write(|w| unsafe {
                     w.txdata().bits(byte as u16)
-                     .pcs().set(0b00_0001)
                 });
 
                 // Wait for RX FIFO data
@@ -544,11 +544,10 @@ mod async_impl {
                     while spi.sr().read().tfff().is_full() {}
                     spi.sr().write(|w| w.tfff().not_full());
 
-                    // Push data with PCS0 asserted, CTAR0
-                    // PCS is a per-line bitmask: bit x asserts PCSx for this transfer.
+                    // Push data with no hardware PCS assertion (GPIO CS is used instead).
                     // SAFETY: txdata is a 16-bit field; u8 as u16 fits.
                     spi.$pushr_fn().write(|w| unsafe {
-                        w.txdata().bits(byte as u16).pcs().set(0b00_0001)
+                        w.txdata().bits(byte as u16)
                     });
 
                     // Enable TCF interrupt and await transfer complete

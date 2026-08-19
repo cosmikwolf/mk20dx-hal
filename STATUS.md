@@ -1,6 +1,6 @@
 # mk20dx-hal: Project Status
 
-**Last updated:** 2026-03-01 (ADC multi-channel DMA scan, DMA channel linking)
+**Last updated:** 2026-03-05 (SPI dual-channel DMA reads: read_dma + DmaReadTransfer)
 
 ---
 
@@ -149,6 +149,8 @@ Reference: K20 ref manual chapter 35 (UART)
 - [x] MCR control: `flush_fifos()`, `set_rx_fifo()`, `set_rooe()`
 - [x] Status/request control: `clear_status()`, `disable_dma_requests()`, `wait_tx_complete()`
 - [x] `write_dma_pushr()` — 32-bit DMA writes to PUSHR with full command field control
+- [x] `read_dma()` — dual-channel DMA reads (TX sends dummy PUSHR words via SOFF=0, RX captures POPR bytes into buffer)
+- [x] `DmaReadTransfer<TX_CH, RX_CH>` — lifetime-safe dual-channel handle with abort-on-drop (cleans up both TX and RX channels)
 - [ ] Hardware validation: tests in `mk20dx-testsuite/tests/spi_loopback.rs` (7 tests, requires PTC6→PTC7 wire)
 
 Reference: K20 ref manual chapter 37 (DSPI)
@@ -509,7 +511,7 @@ Reference: K20 ref manual chapter 29 (FTFL), chapter 30 (FlexMemory)
 
 - [x] `DmaTransfer<'a, CH>` lifetime-safe handle with abort-on-drop (`src/dma.rs`)
 - [x] `is_complete()`, `has_error()`, `wait()` (blocks until done or error)
-- [x] SPI + DMA: `write_dma()` (8-bit) and `write_dma_pushr()` (32-bit PUSHR) with DMAMUX routing (SPI0_TX/RX, SPI1_TX/RX)
+- [x] SPI + DMA: `write_dma()` (8-bit), `write_dma_pushr()` (32-bit PUSHR), `read_dma()` (dual-channel TX dummy + RX capture) with DMAMUX routing (SPI0_TX/RX, SPI1_TX/RX)
 - [x] UART + DMA: `write_dma()`, `read_dma()` with DMAMUX routing (UART0-2 TX/RX)
 - [x] ADC + DMA: `read_dma()` continuous conversion with DMAMUX routing (ADC0, ADC1)
 - [x] Per-instance DMA source constants passed via macro parameters

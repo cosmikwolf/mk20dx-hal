@@ -396,6 +396,84 @@ macro_rules! spi_impl {
                 crate::dma::DmaTransfer { channel: ch }
             }
 
+            /// Start a dual-channel DMA read transfer (full-duplex: TX sends dummy
+            /// bytes to generate clocks, RX captures received data).
+            ///
+            /// `dummy_pushr` must point to a pre-packed PUSHR word with 0x00 data
+            /// (e.g., `pack_pushr(0x00, 0, false, false)`). The TX DMA reads from
+            /// this single word repeatedly (SOFF=0).
+            ///
+            /// After [`DmaReadTransfer::wait()`], call [`disable_dma_requests()`](Self::disable_dma_requests)
+            /// and [`flush_fifos()`](Self::flush_fifos) to clean up.
+            ///
+            /// # Safety
+            ///
+            /// The caller must ensure all buffers remain valid for the duration of
+            /// the transfer (enforced by the lifetime on `DmaReadTransfer`).
+            pub fn read_dma<'a, const TX_CH: u8, const RX_CH: u8>(
+                &'a mut self,
+                buf: &'a mut [u8],
+                tx_ch: &'a mut crate::dma::DmaChannel<TX_CH>,
+                rx_ch: &'a mut crate::dma::DmaChannel<RX_CH>,
+                dummy_pushr: &'a u32,
+            ) -> crate::dma::DmaReadTransfer<'a, TX_CH, RX_CH> {
+                let spi = Self::regs();
+                // BITER/CITER are 15-bit fields. A longer buffer wraps silently,
+                // and 65536 truncates to 0, which breaks DmaChannel::configure's
+                // "major_loop_count is at least 1" contract.
+                debug_assert!(buf.len() <= 32767, "read_dma buffer exceeds the DMA major loop count");
+                let count = buf.len() as u16;
+
+                // Enable RX FIFO, flush both FIFOs, clear status
+                self.set_rx_fifo(true);
+                self.flush_fifos();
+                self.clear_status();
+
+                // TX channel: read single dummy_pushr word (SOFF=0), write to PUSHR as 32-bit
+                unsafe {
+                    tx_ch.configure(&crate::dma::TransferConfig {
+                        source_addr: dummy_pushr as *const u32 as u32,
+                        dest_addr: Self::tx_dma_addr(),
+                        source_size: crate::dma::TransferSize::Bits32,
+                        dest_size: crate::dma::TransferSize::Bits32,
+                        source_offset: 0,   // Same word every time
+                        dest_offset: 0,     // Fixed PUSHR register
+                        minor_loop_bytes: 4, // One PUSHR word per activation
+                        major_loop_count: count,
+                        source_last_adjust: 0,
+                        dest_last_adjust: 0,
+                        dest_modulo: 0,
+                        auto_disable: true,
+                    });
+                }
+                tx_ch.set_source($tx_source);
+
+                // RX channel: read POPR as 8-bit into buf
+                // K20 DSPI POPR: RXDATA in bits [15:0]. For 8-bit frames, data in [7:0].
+                // Little-endian Cortex-M4: Bits8 DMA from POPR address reads bits [7:0].
+                unsafe {
+                    rx_ch.configure_peripheral_read(
+                        Self::rx_dma_addr(),
+                        buf.as_mut_ptr(),
+                        crate::dma::TransferSize::Bits8,
+                        count,
+                    );
+                }
+                rx_ch.set_source($rx_source);
+
+                // Enable both DMA requests: TFFF_RE for TX, RFDF_RE for RX
+                spi.rser().write(|w| {
+                    w.tfff_re().enabled().tfff_dirs().dma()
+                     .rfdf_re().enabled().rfdf_dirs().dma()
+                });
+
+                // Enable both channels — RX first so it's ready when data arrives
+                rx_ch.enable_request();
+                tx_ch.enable_request();
+
+                crate::dma::DmaReadTransfer { tx_channel: tx_ch, rx_channel: rx_ch }
+            }
+
             /// Release the SPI peripheral, returning the PAC type.
             ///
             /// Halts transfers and disables the module before releasing.

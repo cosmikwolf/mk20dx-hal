@@ -1,6 +1,6 @@
 # mk20dx-hal: Project Status
 
-**Last updated:** 2026-08-31 (full on-target sweep green: 32 binaries, 230 tests)
+**Last updated:** 2026-08-31 (full on-target sweep green: 34 binaries, 247 tests)
 
 ---
 
@@ -385,6 +385,7 @@ Reference: K20 ref manual chapter 29 (FTFL)
 - [x] Entire module `#[cfg(feature = "mk20d7")]` — DAC0 not present on mk20d5
 - [x] No `Clocks` parameter needed
 - [x] Hardware validation: tests in `mk20dx-testsuite/tests/dac.rs` (6 tests, register-only + value roundtrip)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/dac_cmp_analog.rs` (5 tests, analog output measured through the internal DAC0_OUT → CMP1_IN3 path)
 
 Reference: K20 ref manual chapter 33 (DAC)
 
@@ -427,6 +428,7 @@ Reference: K20 ref manual chapter 23 (RTC)
 - [x] CMP0 + CMP1 on both variants, CMP2 feature-gated behind `mk20d7`
 - [x] Shared clock gate (SIM SCGC4 CMP bit)
 - [x] Hardware validation: tests in `mk20dx-testsuite/tests/cmp.rs` (7 tests, register-level, internal DAC self-referencing)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/dac_cmp_analog.rs` (5 tests, COUT measured against the internal 6-bit reference)
 
 Reference: K20 ref manual chapter 32 (CMP)
 
@@ -586,6 +588,7 @@ Reference: K20 ref manual chapters 6 (PMC), 7 (LLWU), 8 (RCM), 15 (SMC)
   - [x] `configure()`, `feed()`, `result()`, `result_u16()`, `reset()`
 - [x] Hardware validation: tests in `mk20dx-testsuite/tests/crc.rs` (7 tests, known-vector CRC-16/CRC-32)
 - [x] Hardware validation: tests in `mk20dx-testsuite/tests/lptmr.rs` (8 tests, LPO 1kHz real-time)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/pdb.rs` (10 tests, counter behaviour and LDOK ordering)
 
 ---
 

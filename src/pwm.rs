@@ -1101,6 +1101,11 @@ impl<FTM: sealed::FtmInstance, const PAIR: u8> FtmChannelPair<FTM, PAIR> {
     fn new_init() -> Self {
         let ftm = ftm_regs::<FTM>();
 
+        // Combined mode, dead-time, output masking and inversion all require
+        // FTM features mode, and the sync machinery below only exists when it
+        // is on. Ref manual Table 36-245, §36.4.15.
+        ftm.mode().modify(|_, w| w.ftmen()._1());
+
         // Configure CnSC for both channels: MSB=1, ELSB=1 (high-true combined PWM)
         ftm.csc(Self::EVEN).write(|w| w.msb().set_bit().elsb().set_bit());
         ftm.csc(Self::ODD).write(|w| w.msb().set_bit().elsb().set_bit());
@@ -1495,9 +1500,11 @@ macro_rules! ftm_impl {
                 // Per ref manual §36.4.27, SYNCONF should be written while
                 // FTMEN=0 so enhanced sync mode is latched before FTM
                 // features are enabled.
+                // FTMEN stays 0 here for the same reason as in pwm(): it would
+                // stop a plain EPWM channel reloading CnV. The features that
+                // need it turn it on themselves.
                 ftm.mode().write(|w| w.wpdis()._1());
                 ftm.synconf().write(|w| w.syncmode()._1());
-                ftm.mode().modify(|_, w| w.ftmen()._1());
 
                 // SAFETY: init/count are 16-bit fields; 0 fits.
                 ftm.cntin().write(|w| unsafe { w.init().bits(0) });
@@ -1521,10 +1528,14 @@ macro_rules! ftm_impl {
                 // 1. Disable counter (CLKS=None)
                 ftm.sc().write(|w| w.clks().none());
 
-                // 2. Disable write protection, enable enhanced sync, then FTMEN
+                // 2. Disable write protection and enable enhanced sync.
+                // FTMEN stays 0: with FTMEN=1 an EPWM channel only reloads CnV
+                // through PWM synchronization (ref manual Table 36-245), and a
+                // plain PWM channel has none configured, so duty updates would
+                // never reach the active register. FtmChannelPair sets FTMEN
+                // when combined mode actually needs it.
                 ftm.mode().write(|w| w.wpdis()._1());
                 ftm.synconf().write(|w| w.syncmode()._1());
-                ftm.mode().modify(|_, w| w.ftmen()._1());
 
                 // SAFETY: init/mod_/count are 16-bit fields; values fit.
                 ftm.cntin().write(|w| unsafe { w.init().bits(0) });

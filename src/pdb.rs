@@ -149,7 +149,8 @@ impl Pdb {
     ///
     /// Also sets LDMOD=0 (immediate load on LDOK) and clears any pending
     /// interrupt flag. Does not enable the PDB — call [`enable`](Pdb::enable)
-    /// afterward.
+    /// afterward, and then [`load_ok`](Pdb::load_ok), in that order. MOD is
+    /// buffered and will not load if LDOK is set while the PDB is disabled.
     pub fn configure(
         &mut self,
         trigger: TriggerSource,
@@ -277,6 +278,25 @@ impl Pdb {
     ///
     /// Must be called after writing MOD or CHnDLYm registers. Buffered
     /// values take effect based on the LDMOD setting (default: immediately).
+    ///
+    /// # The PDB must already be enabled
+    ///
+    /// LDOK only moves a buffered value across while the PDB is clocked, so
+    /// call [`enable`](Pdb::enable) **before** this, not after:
+    ///
+    /// ```text
+    /// pdb.configure(..., modulus);
+    /// pdb.enable();
+    /// pdb.load_ok();     // correct
+    ///
+    /// pdb.configure(..., modulus);
+    /// pdb.load_ok();     // silently does nothing
+    /// pdb.enable();
+    /// ```
+    ///
+    /// The wrong order fails quietly. MOD resets to 0xFFFF rather than 0, so
+    /// the counter still runs and only the period is wrong. Pinned by
+    /// `mk20dx-testsuite/tests/pdb.rs::test_mod_needs_enable_before_load_ok`.
     pub fn load_ok(&mut self) {
         regs().sc().modify(|_, w| w.ldok().set_bit());
     }

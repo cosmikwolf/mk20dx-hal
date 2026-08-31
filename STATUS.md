@@ -1,6 +1,6 @@
 # mk20dx-hal: Project Status
 
-**Last updated:** 2026-03-05 (SPI dual-channel DMA reads: read_dma + DmaReadTransfer)
+**Last updated:** 2026-08-31 (full on-target sweep green: 32 binaries, 230 tests)
 
 ---
 
@@ -55,6 +55,7 @@ PAC is dual-licensed MIT/Apache-2.0, has README.md, and Cargo.toml metadata is r
 - [x] Flash configuration field at 0x400 (`src/flash_config.rs`)
 - [x] Watchdog disable consuming WDOG peripheral (`src/watchdog.rs`)
 - [x] `WdogExt` extension trait on `pac::Wdog` with `disable()` method
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/watchdog.rs` (3 tests)
 
 ---
 
@@ -69,9 +70,9 @@ PAC is dual-licensed MIT/Apache-2.0, has README.md, and Cargo.toml metadata is r
 - [x] `ClockSpeed` enum (mk20d7 only): `Mhz72`, `Mhz96`, `Mhz120` overclock presets
 - [x] `Mcg::freeze_at(speed, osc, &sim)` — parameterized clock configuration (mk20d7 only)
 - [x] `freeze()` delegates to `freeze_at(ClockSpeed::Mhz72, ..)` on mk20d7
-- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/clocks.rs` (5 tests, 72 MHz)
-- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/clocks_96mhz.rs` (5 tests, 96 MHz overclock)
-- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/clocks_120mhz.rs` (5 tests, 120 MHz overclock)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/clocks.rs` (5 tests, 72 MHz)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/clocks_96mhz.rs` (5 tests, 96 MHz overclock)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/clocks_120mhz.rs` (5 tests, 120 MHz overclock)
 
 ### Clock Speed Presets (mk20d7)
 
@@ -92,7 +93,7 @@ Reference: K20 ref manual chapters 5 (Clock Distribution), 12 (SIM), 24 (MCG)
 - [x] `Delay` struct wrapping SysTick (`src/delay.rs`)
 - [x] `embedded_hal::delay::DelayNs` implementation
 - [x] Loop handling for delays exceeding 24-bit SysTick reload max
-- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/delay.rs` (7 tests, PIT crosscheck)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/delay.rs` (6 tests, PIT crosscheck)
 
 ---
 
@@ -109,7 +110,7 @@ Reference: K20 ref manual chapters 5 (Clock Distribution), 12 (SIM), 24 (MCG)
 - [x] All 5 ports (A-E) with 32 pins each
 - [x] SIM SCGC5 clock gating in port `new()`
 - [x] `GpioExt` extension trait on `pac::Porta`/etc. with `split(gpio, &sim)` → `PortXPins`
-- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/gpio.rs` (8 tests) + `gpio_loopback.rs` (2 tests, requires PTD5→PTD6 wire)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/gpio.rs` (8 tests) + `gpio_loopback.rs` (2 tests, requires PTD5→PTD6 wire)
 
 Reference: K20 ref manual chapters 11 (PORT), 43 (GPIO)
 
@@ -129,7 +130,8 @@ Reference: K20 ref manual chapters 11 (PORT), 43 (GPIO)
 - [x] Split into `Tx<UART>` and `Rx<UART>` halves
 - [x] DMA helpers: `disable_dma_requests()`, `wait_tx_complete()`
 - [x] Semantic PAC enum names (UART C1-C5, S1, S2, PFIFO, CFIFO, SFIFO)
-- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/uart_loopback.rs` (5 tests, requires PTD3→PTD2 wire)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/uart_loopback.rs` (5 tests, requires PTD3→PTD2 wire)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/uart.rs` (4 tests, baud divisor properties)
 
 Reference: K20 ref manual chapter 35 (UART)
 
@@ -151,7 +153,9 @@ Reference: K20 ref manual chapter 35 (UART)
 - [x] `write_dma_pushr()` — 32-bit DMA writes to PUSHR with full command field control
 - [x] `read_dma()` — dual-channel DMA reads (TX sends dummy PUSHR words via SOFF=0, RX captures POPR bytes into buffer)
 - [x] `DmaReadTransfer<TX_CH, RX_CH>` — lifetime-safe dual-channel handle with abort-on-drop (cleans up both TX and RX channels)
-- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/spi_loopback.rs` (7 tests, requires PTC6→PTC7 wire)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/spi_loopback.rs` (11 tests, requires PTC6→PTC7 wire)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/spi.rs` (5 tests, baud + pack_pushr properties)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/spi_async_loopback.rs` (7 tests, requires PTC6→PTC7 wire)
 
 Reference: K20 ref manual chapter 37 (DSPI)
 
@@ -169,7 +173,7 @@ Reference: K20 ref manual chapter 37 (DSPI)
 - [x] `I2cExt` extension trait on `pac::I2c0` (+ `pac::I2c1` for mk20d7)
 - [x] I2C1 feature-gated behind `mk20d7`
 - [x] Distinct error types: `ArbitrationLoss`, `AddressNack`, `DataNack`
-- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/i2c.rs` (4 tests, requires 4.7kΩ pull-ups on PTB0/PTB1)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/i2c.rs` (7 tests, requires 4.7kΩ pull-ups on PTB0/PTB1)
 
 Reference: K20 ref manual chapter 38 (I2C)
 
@@ -187,7 +191,7 @@ Reference: K20 ref manual chapter 38 (I2C)
 - [x] `current()` to read down-counter value (CVAL)
 - [x] `enable_interrupt()` / `disable_interrupt()` / `has_expired()` / `clear_interrupt()`
 - [x] No `#[cfg]` needed — both mk20d5 and mk20d7 have identical PIT
-- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/timer.rs` (10 tests)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/timer.rs` (10 tests)
 
 Reference: K20 ref manual chapter 28 (PIT)
 
@@ -208,14 +212,15 @@ Reference: K20 ref manual chapter 28 (PIT)
 - [x] Combined mode: `FtmChannelPair<FTM, PAIR>` with complementary output, dead-time, and inversion
 - [x] `into_combined(partner)` on even channels, `into_channels()` to release pair
 - [x] Dead-time configuration: `FtmTimer::set_deadtime(prescaler, value)` (timer-wide DEADTIME register)
+- [x] Output masking: `FtmTimer::set_output_mask(mask)`, `output_mask()`, `set_channel_masked(ch, bool)` (timer-wide OUTMASK register)
 - [x] Complementary output: `enable_complementary()`/`disable_complementary()` (COMP bit per-pair)
 - [x] Dead-time enable: `enable_deadtime()`/`disable_deadtime()` (DTEN bit per-pair)
 - [x] Output inversion: `set_inversion()` via INVCTRL (double-buffered)
 - [x] Enhanced sync: SYNCONF.SYNCMODE=1 set during `split()`/`pwm()` (backward-compatible)
 - [x] PWM sync control: `software_sync()`, `set_sync_loading_points(at_min, at_max)` on FtmTimer
 - [x] `ftm_pair_impl!` macro: FTM0 (4 pairs), FTM1 (1 pair), FTM2 (1 pair, mk20d7 only)
-- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/pwm.rs` (7 tests, register-only)
-- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/pwm_combined.rs` (18 tests, register-only)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/pwm.rs` (11 tests, duty also measured at the pin by ftm_loopback)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/pwm_combined.rs` (19 tests, register-level; behaviour covered by ftm_combined_loopback)
 
 Reference: K20 ref manual chapter 36 (FTM), §36.4.15 (COMBINE), §36.4.16 (DEADTIME), §36.4.21 (SYNC), §36.4.22 (INVCTRL), §36.4.27 (SYNCONF)
 
@@ -244,7 +249,7 @@ Reference: K20 ref manual chapter 36 (FTM), §36.4.15 (COMBINE), §36.4.16 (DEAD
   - [x] DMA-B writes rotated mux buffer entries to SC1A (channel cycling)
   - [x] PDB fires single pre-trigger 0 continuously; DMA handles mux rotation
   - [x] `sc1a_dma_addr()` helper for DMA mux writes to SC1[0]
-- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/adc.rs` (10 tests, internal references)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/adc.rs` (10 tests, internal references)
 
 Reference: K20 ref manual chapter 31 (ADC), chapter 34 (PDB)
 
@@ -274,7 +279,7 @@ Reference: K20 ref manual chapter 31 (ADC), chapter 34 (PDB)
 - [x] mk20d7-only DMA sources feature-gated (SPI1, I2C1, FTM2, ADC1, CMP2)
 - [x] Channel linking: `configure_linked()` with `ChannelLink` enum (MinorLoop, MajorLoop, Both)
 - [x] Scatter-gather: `ScatterGatherTcd` (32-byte aligned) with `configure_scatter_gather()`, `from_config()`, `set_next()`
-- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/dma.rs` (11 tests, memory-to-memory)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/dma.rs` (14 tests, memory-to-memory)
 
 Reference: K20 ref manual chapter 21 (eDMA), chapter 22 (DMAMUX)
 
@@ -299,13 +304,13 @@ Reference: K20 ref manual chapter 21 (eDMA), chapter 22 (DMAMUX)
 - [x] Force reset via USBENSOFEN toggle
 - [x] ISTAT/ERRSTAT w1c correct handling (write() not modify())
 - [x] No `#[cfg]` needed — both mk20d5 and mk20d7 have identical USB0
-- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/usb.rs` (6 tests, init/alloc only)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/usb.rs` (6 tests, init/alloc only)
 
 Reference: K20 ref manual chapter 34 (USB OTG / USB-FS)
 
 ---
 
-## Phase 12: Hardware Validation Test Suite — COMPLETE (blocking code), PENDING (async + on-target execution)
+## Phase 12: Hardware Validation Test Suite — COMPLETE
 
 ### Blocking Tests (Complete)
 
@@ -363,7 +368,7 @@ See STRATEGY.md Phase 12.4–12.6 for full details.
 - [x] `FlashError` enum with `NorFlashError` impl (NotAligned, OutOfBounds, Protected, AccessError, ProtectionViolation, CommandFailure)
 - [x] Critical section (`cortex_m::interrupt::free`) around flash commands
 - [x] No `#[cfg]` needed for driver logic — both mk20d5 and mk20d7 have identical FTFL (only capacity differs)
-- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/flash.rs` (6 tests, read-only + error path validation — NO erase/write tests due to bricking risk)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/flash.rs` (6 tests, read-only + error path validation — NO erase/write tests due to bricking risk)
 
 Reference: K20 ref manual chapter 29 (FTFL)
 
@@ -379,7 +384,7 @@ Reference: K20 ref manual chapter 29 (FTFL)
 - [x] Init defaults: DACEN=1, VREF1 (VDDA), software trigger, buffer disabled, high power, output=0
 - [x] Entire module `#[cfg(feature = "mk20d7")]` — DAC0 not present on mk20d5
 - [x] No `Clocks` parameter needed
-- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/dac.rs` (6 tests, register-only + value roundtrip)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/dac.rs` (6 tests, register-only + value roundtrip)
 
 Reference: K20 ref manual chapter 33 (DAC)
 
@@ -398,7 +403,7 @@ Reference: K20 ref manual chapter 33 (DAC)
 - [x] Init: clock gate, clear SWR, enable oscillator (OSCE=1, SC8P+SC2P ~10pF), disable interrupts, start counter if valid
 - [x] No `Clocks` parameter (RTC uses independent 32.768 kHz oscillator)
 - [x] No `#[cfg]` needed — both mk20d5 and mk20d7 have identical RTC
-- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/rtc.rs` (8 tests, uses 32.768 kHz oscillator)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/rtc.rs` (8 tests, uses 32.768 kHz oscillator)
 
 Reference: K20 ref manual chapter 23 (RTC)
 
@@ -421,7 +426,7 @@ Reference: K20 ref manual chapter 23 (RTC)
 - [x] SCR w1c hazard handled: all SCR writes use `write()` with manual config bit preservation
 - [x] CMP0 + CMP1 on both variants, CMP2 feature-gated behind `mk20d7`
 - [x] Shared clock gate (SIM SCGC4 CMP bit)
-- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/cmp.rs` (7 tests, register-level, internal DAC self-referencing)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/cmp.rs` (7 tests, register-level, internal DAC self-referencing)
 
 Reference: K20 ref manual chapter 32 (CMP)
 
@@ -473,7 +478,7 @@ All async code is behind `#[cfg(feature = "async")]` and requires the `async` Ca
 - [x] Byte-level read/write (`read`, `write`) and bulk (`read_slice`, `write_slice`)
 - [x] Unsafe partition command (`partition()` — one-time factory provisioning via FTFL command 0x80)
 - [x] `capacity()` returns configured EEPROM size
-- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/eeprom.rs` (5 tests, conditional on partition state)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/eeprom.rs` (5 tests, conditional on partition state)
 
 Reference: K20 ref manual chapter 29 (FTFL), chapter 30 (FlexMemory)
 
@@ -517,6 +522,7 @@ Reference: K20 ref manual chapter 29 (FTFL), chapter 30 (FlexMemory)
 - [x] Per-instance DMA source constants passed via macro parameters
 - [x] PDB driver (`src/pdb.rs`): `PdbExt` on `pac::Pdb0`, configurable prescaler/multiplier/modulus, continuous mode, pre-trigger enable/disable/delay, back-to-back mode, sequence error detection
 - [x] ADC + PDB + DMA: `start_continuous_scan()` (1-2 channels) and `start_multi_channel_scan()` (3+ channels with DMA channel linking)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/ftm_dma.rs` (7 tests, FTM-triggered DMA)
 
 ---
 
@@ -528,7 +534,9 @@ Reference: K20 ref manual chapter 29 (FTFL), chapter 30 (FlexMemory)
 - [x] `sealed::FtmInstance` trait for code sharing across FTM0/1/2
 - [x] Enums: CaptureEdge, CompareAction, QuadMode, Direction (all with defmt support)
 - [x] QuadratureDecoder restricted to FTM1/FTM2 (only instances with QDCTRL)
-- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/pwm_advanced.rs` (9 tests, register-level OC/IC/Quad)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/pwm_advanced.rs` (13 tests, register-level OC/IC/Quad)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/ftm_loopback.rs` (8 tests, waveform measured at the pin, requires PTC1→PTC3 wire)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/ftm_combined_loopback.rs` (6 tests, complementary output and dead-time at the pins, requires PTC1→PTC3 and PTC2→PTC4 wires)
 
 Reference: K20 ref manual chapter 36 (FTM)
 
@@ -554,8 +562,8 @@ Reference: K20 ref manual chapter 36 (FTM)
 - [x] `PeeState` saves/restores SIM CLKDIV1 register (works with any `ClockSpeed` preset)
 - [x] SIM clock divider adjustment for VLPR limits (4 MHz core, 1 MHz bus/flash)
 - [x] StopMode, PowerMode, WakeEdge, LlwuPin, LlwuModule enums (all with defmt support)
-- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/power.rs` (3 tests, initial state + config)
-- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/llwu.rs` (5 tests, register config)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/power.rs` (3 tests, initial state + config)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/llwu.rs` (5 tests, register config)
 
 Reference: K20 ref manual chapters 6 (PMC), 7 (LLWU), 8 (RCM), 15 (SMC)
 
@@ -576,8 +584,8 @@ Reference: K20 ref manual chapters 6 (PMC), 7 (LLWU), 8 (RCM), 15 (SMC)
   - [x] Configurable polynomial, seed, bit width (16/32), transpose modes
   - [x] Preset configurations: `CrcConfig::crc16_ccitt()`, `CrcConfig::crc32()`
   - [x] `configure()`, `feed()`, `result()`, `result_u16()`, `reset()`
-- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/crc.rs` (7 tests, known-vector CRC-16/CRC-32)
-- [ ] Hardware validation: tests in `mk20dx-testsuite/tests/lptmr.rs` (8 tests, LPO 1kHz real-time)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/crc.rs` (7 tests, known-vector CRC-16/CRC-32)
+- [x] Hardware validation: tests in `mk20dx-testsuite/tests/lptmr.rs` (8 tests, LPO 1kHz real-time)
 
 ---
 

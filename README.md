@@ -17,6 +17,13 @@ microcontrollers, implementing [`embedded-hal`] 1.0 traits on top of the
 
 Target: `thumbv7em-none-eabi` (Cortex-M4, no FPU).
 
+### Note
+
+The hardware test suite runs on a Teensy 3.2, which is an MK20DX256, so every
+on-target result backs `mk20d7` and none of it backs `mk20d5`. The `mk20d5`
+build compiles and shares the same drivers, but nothing has run on the part.
+Please test thoroughly before relying on it. Bug reports are welcome.
+
 ## Usage
 
 Add the HAL to your `Cargo.toml` with the appropriate feature for your board:

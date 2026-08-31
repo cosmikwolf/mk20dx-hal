@@ -2,10 +2,11 @@
 
 Hardware Abstraction Layer for the NXP Kinetis MK20DX128 and MK20DX256
 microcontrollers, implementing [`embedded-hal`] 1.0 traits on top of the
-[`mk20dx-pac`] peripheral access crates.
+[`mk20d5-pac`] and [`mk20d7-pac`] peripheral access crates.
 
 [`embedded-hal`]: https://crates.io/crates/embedded-hal
-[`mk20dx-pac`]: ../mk20dx-pac/
+[`mk20d5-pac`]: https://crates.io/crates/mk20d5-pac
+[`mk20d7-pac`]: https://crates.io/crates/mk20d7-pac
 
 ## Supported Hardware
 
@@ -22,13 +23,27 @@ Add the HAL to your `Cargo.toml` with the appropriate feature for your board:
 
 ```toml
 [dependencies]
-mk20dx-hal = { path = "../mk20dx-hal", features = ["mk20d7"] }  # Teensy 3.1/3.2
-# mk20dx-hal = { path = "../mk20dx-hal", features = ["mk20d5"] }  # Teensy 3.0
+mk20dx-hal = { version = "0.1", features = ["mk20d7", "rt", "critical-section"] }
+# mk20dx-hal = { version = "0.1", features = ["mk20d5", "rt", "critical-section"] }
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7"
 ```
 
-Copy `.cargo/config.toml` and the appropriate `memory.x` linker script into
-your project. The target is set in `.cargo/config.toml` so `--target` is not
-needed on the command line.
+`rt` brings in the vector table, and `critical-section` is what gives you
+`Peripherals::take()` — without it the PAC only exposes `unsafe steal()`.
+`cortex-m`'s `critical-section-single-core` supplies the implementation.
+
+The HAL's build script writes the right `memory.x` for the selected chip and
+puts it on the linker search path, so there is nothing to copy. Your crate only
+needs a `.cargo/config.toml` setting the target and the `link.x` rustflag:
+
+```toml
+[build]
+target = "thumbv7em-none-eabi"
+
+[target.thumbv7em-none-eabi]
+rustflags = ["-C", "link-arg=-Tlink.x"]
+```
 
 > **Flash security warning:** The 16-byte flash configuration field at 0x400
 > must have FSEC = `0xFE` (unsecured). If erased to `0xFF`, the chip becomes

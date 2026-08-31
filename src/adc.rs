@@ -280,7 +280,7 @@ macro_rules! adc_impl {
 
             /// Return the SC1A register address for DMA mux writes.
             ///
-            /// SC1[0] (SC1A) is at offset 0x00 from the ADC base address.
+            /// `SC1[0]` (SC1A) is at offset 0x00 from the ADC base address.
             /// Used by multi-channel scan to let DMA write the next channel
             /// number into SC1A between conversions.
             pub fn sc1a_dma_addr() -> u32 {

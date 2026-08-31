@@ -117,12 +117,15 @@ pub fn calc_baud(bus_clk: u32, target: u32) -> (u8, u8, bool) {
 /// Build a PUSHR command word from TX data and control fields.
 ///
 /// PUSHR layout:
-///   [31]    CONT  — Keep PCS asserted between transfers
-///   [30:28] CTAS  — CTAR select (hardcoded to 000 = CTAR0)
-///   [27]    EOQ   — End of Queue
-///   [26]    CTCNT — Clear transfer counter (hardcoded to 0)
-///   [21:16] PCS   — Peripheral chip select bitmask
-///   [15:0]  TXDATA — Transmit data
+///
+/// ```text
+/// [31]    CONT   — Keep PCS asserted between transfers
+/// [30:28] CTAS   — CTAR select (hardcoded to 000 = CTAR0)
+/// [27]    EOQ    — End of Queue
+/// [26]    CTCNT  — Clear transfer counter (hardcoded to 0)
+/// [21:16] PCS    — Peripheral chip select bitmask
+/// [15:0]  TXDATA — Transmit data
+/// ```
 pub const fn pack_pushr(data: u16, pcs: u8, cont: bool, eoq: bool) -> u32 {
     let mut word = data as u32;
     word |= ((pcs & 0x3F) as u32) << 16;
@@ -267,7 +270,7 @@ macro_rules! spi_impl {
 
             /// Return the TX (PUSHR) register address for DMA configuration.
             ///
-            /// Use with [`DmaChannel::configure_peripheral_write`] and
+            /// Use with [`DmaChannel::configure_peripheral_write`](crate::dma::DmaChannel::configure_peripheral_write) and
             /// the appropriate `DmaSource` (e.g., `DmaSource::SPI0_TX`).
             pub fn tx_dma_addr() -> u32 {
                 <$PacType>::PTR as u32 + 0x34 // PUSHR offset
@@ -275,7 +278,7 @@ macro_rules! spi_impl {
 
             /// Return the RX (POPR) register address for DMA configuration.
             ///
-            /// Use with [`DmaChannel::configure_peripheral_read`] and
+            /// Use with [`DmaChannel::configure_peripheral_read`](crate::dma::DmaChannel::configure_peripheral_read) and
             /// the appropriate `DmaSource` (e.g., `DmaSource::SPI0_RX`).
             pub fn rx_dma_addr() -> u32 {
                 <$PacType>::PTR as u32 + 0x38 // POPR offset
@@ -327,8 +330,8 @@ macro_rules! spi_impl {
             /// to the SPI TX register, then enables hardware DMA requests.
             /// The SPI TFFF_RE bit is set to trigger DMA when the TX FIFO has space.
             ///
-            /// Returns a [`DmaTransfer`] handle. The transfer runs in the background;
-            /// call [`DmaTransfer::wait`] to block until complete.
+            /// Returns a [`DmaTransfer`](crate::dma::DmaTransfer) handle. The transfer runs in the background;
+            /// call [`DmaTransfer::wait`](crate::dma::DmaTransfer::wait) to block until complete.
             ///
             /// # Safety
             ///
@@ -366,7 +369,7 @@ macro_rules! spi_impl {
             /// Start a 32-bit DMA write to PUSHR using pre-packed command words.
             ///
             /// Each `u32` in `buf` is a complete PUSHR word (use [`pack_pushr()`] to build).
-            /// After [`DmaTransfer::wait()`], call [`disable_dma_requests()`](Self::disable_dma_requests)
+            /// After [`DmaTransfer::wait()`](crate::dma::DmaTransfer::wait), call [`disable_dma_requests()`](Self::disable_dma_requests)
             /// to clean up.
             ///
             /// # Safety
@@ -403,7 +406,7 @@ macro_rules! spi_impl {
             /// (e.g., `pack_pushr(0x00, 0, false, false)`). The TX DMA reads from
             /// this single word repeatedly (SOFF=0).
             ///
-            /// After [`DmaReadTransfer::wait()`], call [`disable_dma_requests()`](Self::disable_dma_requests)
+            /// After [`DmaReadTransfer::wait()`](crate::dma::DmaReadTransfer::wait), call [`disable_dma_requests()`](Self::disable_dma_requests)
             /// and [`flush_fifos()`](Self::flush_fifos) to clean up.
             ///
             /// # Safety

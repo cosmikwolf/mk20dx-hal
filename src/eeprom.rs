@@ -137,7 +137,7 @@ impl FlexNvmPartition {
 
 /// EEPROM / FlexMemory driver.
 ///
-/// Created alongside [`Flash`] by calling [`FlashExt::flash`](crate::flash::FlashExt::flash)
+/// Created alongside [`Flash`](crate::flash::Flash) by calling [`FlashExt::flash`](crate::flash::FlashExt::flash)
 /// on the PAC `Ftfl` peripheral.
 pub struct Eeprom {
     _ftfl: (),

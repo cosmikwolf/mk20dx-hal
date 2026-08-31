@@ -45,7 +45,7 @@ fn regs() -> &'static pac::pdb0::RegisterBlock {
 
 // ----- Configuration Enums -----
 
-/// PDB trigger source selection (SC.TRGSEL[3:0]).
+/// PDB trigger source selection (`SC.TRGSEL[3:0]`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum TriggerSource {
@@ -68,7 +68,7 @@ pub enum TriggerSource {
     Software = 15,
 }
 
-/// PDB prescaler divider (SC.PRESCALER[2:0]).
+/// PDB prescaler divider (`SC.PRESCALER[2:0]`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Prescaler {
@@ -82,7 +82,7 @@ pub enum Prescaler {
     Div128 = 7,
 }
 
-/// PDB prescaler multiplication factor (SC.MULT[1:0]).
+/// PDB prescaler multiplication factor (`SC.MULT[1:0]`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Multiplier {

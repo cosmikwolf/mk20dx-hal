@@ -517,6 +517,45 @@ impl<FTM: sealed::FtmInstance> FtmTimer<FTM> {
         ftm.mode().modify(|_, w| w.init().set_bit());
     }
 
+    // --- Output masking (timer-wide OUTMASK register) ---
+
+    /// Mask or unmask channel outputs.
+    ///
+    /// A masked channel is forced to its inactive state and stops responding to
+    /// channel matches. The counter, the channel flags and the compare values
+    /// all keep running underneath, so unmasking resumes the waveform mid-period
+    /// rather than restarting it. This is what BLDC commutation uses to gate a
+    /// phase on and off.
+    ///
+    /// Bit N high masks channel N. Passing 0 unmasks every channel.
+    ///
+    /// Writes to OUTMASK land in a buffer. With `SYNCONF[SYNCHOM]` clear, which
+    /// is the reset state and what [`FtmExt::pwm`] and [`FtmExt::split`] leave
+    /// in place, the buffer loads on each rising edge of the system clock, so
+    /// the mask takes effect immediately. Setting SYNCHOM defers the load to a
+    /// PWM synchronization instead. Ref manual §36.3.13, §36.4.22.
+    pub fn set_output_mask(&mut self, channel_mask: u8) {
+        let ftm = ftm_regs::<FTM>();
+        // SAFETY: only the low 8 bits of OUTMASK are defined; channel_mask is u8.
+        ftm.outmask().write(|w| unsafe { w.bits(channel_mask as u32) });
+    }
+
+    /// Read back which channel outputs are masked.
+    ///
+    /// This reads the active register, not the write buffer.
+    pub fn output_mask(&self) -> u8 {
+        let ftm = ftm_regs::<FTM>();
+        (ftm.outmask().read().bits() & 0xFF) as u8
+    }
+
+    /// Mask or unmask a single channel, leaving the others as they are.
+    pub fn set_channel_masked(&mut self, channel: u8, masked: bool) {
+        let bit = 1u8 << (channel & 0x07);
+        let current = self.output_mask();
+        let next = if masked { current | bit } else { current & !bit };
+        self.set_output_mask(next);
+    }
+
     // --- Dead-time configuration (timer-wide DEADTIME register) ---
 
     /// Configure the dead-time prescaler and value.

@@ -135,7 +135,10 @@ use mk20dx_hal::prelude::*;
 let dp = pac::Peripherals::take().unwrap();
 let cp = cortex_m::Peripherals::take().unwrap();
 
-// Disable watchdog (consumes WDOG peripheral)
+// Disable watchdog (consumes WDOG peripheral). NOTE: this is too late on its
+// own. K20 RM §23.3.2 requires the unlock within 256 bus cycles of reset, and
+// RAM init already used them. The real disable belongs in #[pre_init]; see the
+// WdogExt docs and README. The bug is invisible under a debugger (RM §23.5).
 dp.wdog.disable();
 
 // Configure clocks: MCG → PLL → 72 MHz (consumes MCG + OSC, borrows SIM)

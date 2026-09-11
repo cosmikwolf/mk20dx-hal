@@ -66,12 +66,25 @@ rustflags = ["-C", "link-arg=-Tlink.x"]
 use mk20dx_hal::prelude::*;
 use mk20dx_hal::{pac, delay::Delay};
 
+// The WDOG must be unlocked within 256 bus clock cycles of reset (K20 RM
+// §23.3.2) or the chip resets. RAM init takes longer than that, so do it here,
+// not in main. See `WdogExt` docs. Invisible under a debugger.
+#[cortex_m_rt::pre_init]
+unsafe fn disable_wdog_early() {
+    let wdog = &*pac::Wdog::ptr();
+    wdog.unlock().write(|w| w.bits(0xC520));
+    wdog.unlock().write(|w| w.bits(0xD928));
+    cortex_m::asm::nop();
+    cortex_m::asm::nop();
+    wdog.stctrlh().write(|w| w.wdogen().disabled());
+}
+
 #[cortex_m_rt::entry]
 fn main() -> ! {
     let dp = pac::Peripherals::take().unwrap();
     let cp = cortex_m::Peripherals::take().unwrap();
 
-    dp.wdog.disable();
+    dp.wdog.disable(); // consumes WDOG; the early unlock above is the one that matters
     let clocks = dp.mcg.constrain().freeze(dp.osc, &dp.sim);
 
     let pins_c = dp.portc.split(dp.ptc, &dp.sim);
@@ -112,7 +125,7 @@ fn main() -> ! {
 | Delay | `delay` | `DelayNs` | SysTick-based |
 | Power | `power` | *(HAL-specific)* | Wait, Stop, VLPR, VLPS, LLS, VLLS modes |
 | LLWU | `llwu` | *(HAL-specific)* | Low-leakage wakeup unit |
-| Watchdog | `watchdog` | | Disable only (20 bus-cycle unlock window) |
+| Watchdog | `watchdog` | | Disable only. Must be unlocked within 256 bus cycles of reset — use `#[pre_init]`, see `WdogExt` |
 
 ## Feature Flags
 

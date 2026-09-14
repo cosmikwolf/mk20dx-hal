@@ -132,7 +132,19 @@ impl Rtc {
     ///
     /// When the seconds counter matches this value, the Time Alarm Flag
     /// (TAF) is set. Enable the alarm interrupt with
-    /// `enable_alarm_interrupt()` to receive an interrupt.
+    /// Set the alarm to fire at an absolute seconds value.
+    ///
+    /// Writing TAR also clears any pending alarm flag.
+    ///
+    /// **The alarm fires one second later than the value written.** TAF is
+    /// set when TSR *matches* TAR and then increments (K20 RM ch.36), so an
+    /// alarm armed for `t` asserts as TSR becomes `t + 1`. Measured on
+    /// hardware: armed at TSR=1700000003 for TAR=1700000005, TAF set at
+    /// TSR=1700000006 — three seconds for a "+2" alarm. Subtract one from
+    /// the target if you need it to fire on `t` itself.
+    ///
+    /// This is the part's behaviour, not a timebase error: the 32.768 kHz
+    /// prescaler measures 16386 counts per 500 ms against a 16384 ideal.
     pub fn set_alarm(&mut self, seconds: u32) {
         let rtc = Self::regs();
         rtc.tar().write(|w| unsafe { w.tar().bits(seconds) });

@@ -20,9 +20,18 @@ use crate::pac;
 /// DAC voltage reference source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VrefSource {
-    /// DACREF_1 (VDDA on Teensy — typically 3.3V).
+    /// DACREF_1 — the VREF module's `VREF_OUT` (nominally 1.2 V).
+    ///
+    /// **`VREF_OUT` is not powered until the VREF module is enabled**
+    /// (`SIM_SCGC4[VREF]` and `VREF_SC[VREFEN]`), which this HAL does not do
+    /// for you. Selecting this without enabling VREF leaves the DAC ladder
+    /// unpowered and the output near zero. Use [`Vref2`](Self::Vref2) for
+    /// VDDA unless you have deliberately brought VREF up.
+    ///
+    /// K20 RM ch.3: "VREF_OUT is connected to the DACREF_1 input and VDDA is
+    /// connected to the DACREF_2 input."
     Vref1,
-    /// DACREF_2 (VREF_OUT).
+    /// DACREF_2 — VDDA (3.3 V on a Teensy). The usual choice.
     Vref2,
 }
 

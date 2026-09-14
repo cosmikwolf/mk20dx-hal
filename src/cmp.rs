@@ -58,9 +58,18 @@ impl Input {
 /// Voltage reference source for the CMP internal 6-bit DAC.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CmpDacVref {
-    /// Vin1 (typically VDDA / 3.3V).
+    /// Vin1 — the VREF module's `VREF_OUT` (nominally 1.2 V).
+    ///
+    /// **`VREF_OUT` is not powered until the VREF module is enabled**
+    /// (`SIM_SCGC4[VREF]` and `VREF_SC[VREFEN]`), which this HAL does not do
+    /// for you. Selecting this without enabling VREF leaves the 6-bit ladder
+    /// unpowered, so every comparison is against roughly zero. Use
+    /// [`Vin2`](Self::Vin2) for VDD unless you have brought VREF up.
+    ///
+    /// K20 RM ch.3 lists the CMP supply reference inputs as
+    /// "VREF_OUT - Vin1 input" and "VDD - Vin2 input".
     Vin1,
-    /// Vin2 (typically VREF_OUT).
+    /// Vin2 — VDD (3.3 V on a Teensy). The usual choice.
     Vin2,
 }
 

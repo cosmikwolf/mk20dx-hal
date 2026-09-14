@@ -30,7 +30,7 @@ embedded-hal = "1.0"
 embedded-hal-nb = "1.0"
 embedded-io = "0.6"
 nb = "1.1"
-fugit = "0.3"
+fugit = "0.6"
 critical-section = "1.1"
 
 [dependencies.mk20d5]

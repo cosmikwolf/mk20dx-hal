@@ -275,6 +275,12 @@ pub struct ScatterGatherTcd {
     pub biter: u16,
 }
 
+impl Default for ScatterGatherTcd {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ScatterGatherTcd {
     /// Create a zeroed TCD.
     pub const fn new() -> Self {
@@ -493,13 +499,10 @@ impl<const CH: u8> DmaChannel<CH> {
     ///
     /// Same requirements as [`configure`](DmaChannel::configure).
     pub unsafe fn configure_linked(&mut self, config: &TransferConfig, link: ChannelLink) {
-        match link {
-            ChannelLink::None => {
-                // Delegate to existing configure()
-                self.configure(config);
-                return;
-            }
-            _ => {}
+        if link == ChannelLink::None {
+            // Delegate to existing configure()
+            self.configure(config);
+            return;
         }
 
         let dma = dma_regs();

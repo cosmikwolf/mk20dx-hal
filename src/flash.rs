@@ -258,7 +258,7 @@ impl Flash {
         let region = address / PROTECTION_REGION_SIZE;
         // FPROT array in memory: [0x10]=FPROT3 (regions 0-7), [0x11]=FPROT2 (8-15),
         //                        [0x12]=FPROT1 (16-23), [0x13]=FPROT0 (24-31)
-        let fprot_idx = (region / 8) as u32;
+        let fprot_idx = region / 8;
         let fprot_bit = (region % 8) as u8;
         let fprot_val =
             unsafe { ptr::read_volatile((FTFL_BASE + FPROT_OFFSET + fprot_idx) as *const u8) };

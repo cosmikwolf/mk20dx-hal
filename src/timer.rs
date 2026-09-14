@@ -52,7 +52,7 @@ impl<const CH: u8> PitChannel<CH> {
     /// clamped to `u32::MAX` ticks. Use [`start_ticks()`](PitChannel::start_ticks)
     /// for precise control.
     pub fn start(&mut self, period: fugit::MicrosDurationU32) {
-        let us = period.ticks() as u64;
+        let us = period.as_ticks() as u64;
         let ticks = (us * self.bus_clk as u64 / 1_000_000)
             .saturating_sub(1)
             .min(u32::MAX as u64) as u32;
@@ -146,7 +146,7 @@ impl PitExt for pac::Pit {
         let pit = regs();
         pit.mcr().write(|w| w.mdis()._0().frz()._1());
 
-        let bus_clk = clocks.bus_clk().raw();
+        let bus_clk = clocks.bus_clk().to_raw();
         PitChannels {
             ch0: PitChannel { bus_clk },
             ch1: PitChannel { bus_clk },

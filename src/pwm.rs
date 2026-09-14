@@ -421,8 +421,8 @@ impl<FTM: sealed::FtmInstance> FtmTimer<FTM> {
     /// prescaler, and resets the counter. Does **not** restart — call
     /// [`start`](Self::start) afterward.
     pub fn set_frequency(&mut self, freq: Hertz, clocks: &Clocks) {
-        let bus_clk = clocks.bus_clk().raw();
-        let (ps_idx, mod_val) = calc_prescaler(bus_clk, freq.raw());
+        let bus_clk = clocks.bus_clk().to_raw();
+        let (ps_idx, mod_val) = calc_prescaler(bus_clk, freq.to_raw());
 
         let ftm = ftm_regs::<FTM>();
 
@@ -1556,8 +1556,8 @@ macro_rules! ftm_impl {
             }
 
             fn pwm(self, frequency: Hertz, clocks: &Clocks, sim: &pac::Sim) -> $Channels {
-                let bus_clk = clocks.bus_clk().raw();
-                let (ps_idx, mod_val) = calc_prescaler(bus_clk, frequency.raw());
+                let bus_clk = clocks.bus_clk().to_raw();
+                let (ps_idx, mod_val) = calc_prescaler(bus_clk, frequency.to_raw());
 
                 // Enable clock gate
                 sim.$scgc_reg().modify(|_, w| w.$scgc_field().enabled());

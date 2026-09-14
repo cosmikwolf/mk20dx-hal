@@ -30,8 +30,8 @@ Add the HAL to your `Cargo.toml` with the appropriate feature for your board:
 
 ```toml
 [dependencies]
-mk20dx-hal = { version = "0.1", features = ["mk20d7", "rt", "critical-section"] }
-# mk20dx-hal = { version = "0.1", features = ["mk20d5", "rt", "critical-section"] }
+mk20dx-hal = { version = "0.2", features = ["mk20d7", "rt", "critical-section"] }
+# mk20dx-hal = { version = "0.2", features = ["mk20d5", "rt", "critical-section"] }
 cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
 cortex-m-rt = "0.7"
 ```

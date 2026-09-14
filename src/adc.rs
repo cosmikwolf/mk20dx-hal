@@ -522,7 +522,7 @@ macro_rules! adc_scan_impl {
                 pdb: &'a mut crate::pdb::Pdb,
             ) -> ContinuousScan<'a, DMA_CH> {
                 let num_ch = config.channels.len();
-                assert!(num_ch >= 1 && num_ch <= 2);
+                assert!((1..=2).contains(&num_ch));
                 assert!(results.len() >= num_ch);
 
                 let adc = Self::regs();

@@ -130,8 +130,15 @@ macro_rules! scr_safe_write {
             val |= 1 << 6;
         }
         // CFF (bit 1) and CFR (bit 2) are left as 0 — safe for w1c
-        let modify_fn: fn(u8) -> u8 = $modify;
-        val = modify_fn(val);
+        // The `fn(u8) -> u8` annotation is deliberate: coercing to a function
+        // pointer rejects a capturing closure, so the caller cannot smuggle
+        // state into a register read-modify-write. Clippy sees the closure
+        // called once and suggests inlining it, which would drop that check.
+        #[allow(clippy::redundant_closure_call)]
+        {
+            let modify_fn: fn(u8) -> u8 = $modify;
+            val = modify_fn(val);
+        }
         $cmp.scr().write(|w| unsafe { w.bits(val) });
     }};
 }

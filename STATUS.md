@@ -82,7 +82,7 @@ PAC is dual-licensed MIT/Apache-2.0, has README.md, and Cargo.toml metadata is r
 | `Mhz96` | 96 MHz | 48 MHz | 24 MHz | ÷4 | ×24 | Overclock, widely used |
 | `Mhz120` | 120 MHz | 60 MHz | 24 MHz | ÷4 | ×30 | Overclock, Teensyduino default |
 
-**Known limitation:** USB clock divider (SIM CLKDIV2) is currently hardcoded for 72 MHz PLL output. USB will not enumerate correctly at 96 or 120 MHz until the USB driver is updated to derive the correct divider from the actual PLL frequency.
+**Known limitation (partly addressed 2026-09-11, see Phase 11):** the USB clock divider (SIM CLKDIV2) was hardcoded for 72 MHz PLL output, so USB could not enumerate at 96 or 120 MHz. The uncommitted working-tree change now writes the 120 MHz pair. The proper fix is still to derive the divider from the actual PLL frequency (take `&Clocks` in `usb_bus()` and write the pair in `enable()`): 48 MHz to (0,0), 72 to (1,2), 96 to (0,1), 120 to (1,4).
 
 Reference: K20 ref manual chapters 5 (Clock Distribution), 12 (SIM), 24 (MCG)
 
@@ -285,7 +285,7 @@ Reference: K20 ref manual chapter 21 (eDMA), chapter 22 (DMAMUX)
 
 ---
 
-## Phase 11: USB Device — COMPLETE
+## Phase 11: USB Device — registers COMPLETE, enumeration NOT WORKING (see 2026-09-11 below)
 
 - [x] `UsbBus` struct implementing `usb_device::bus::UsbBus` trait (v0.3)
 - [x] `UsbBusExt` extension trait on `pac::Usb0` with `usb_bus(sim)` → `UsbBus`
@@ -305,6 +305,102 @@ Reference: K20 ref manual chapter 21 (eDMA), chapter 22 (DMAMUX)
 - [x] ISTAT/ERRSTAT w1c correct handling (write() not modify())
 - [x] No `#[cfg]` needed — both mk20d5 and mk20d7 have identical USB0
 - [x] Hardware validation: tests in `mk20dx-testsuite/tests/usb.rs` (6 tests, init/alloc only)
+
+### 2026-09-14 — USB MIDI enumerates
+
+Resolved. The FLXS1 board enumerates on macOS as `Zetaohm FLXS1`
+(16c0:0485), reaches `UsbDeviceState::Configured`, and CoreMIDI lists
+`FLXS1` as both a source and a destination.
+
+Four further defects were found after the three below, all in EP0 handling,
+all fixed in `src/usb.rs`:
+
+4. **`poll()` reported bus state before servicing tokens.** SLEEP and RESUME
+   were checked before the TOKDNE loop. A SETUP freezes the controller via
+   `CTL[TXSUSPENDTOKENBUSY]` until firmware clears it, and that clear only
+   happens in the token loop — so: frozen -> device cannot answer -> bus goes
+   idle -> SLEEP sets -> `poll()` returns `Suspend` before the loop -> the
+   freeze is never cleared. A livelock. The reference ISR services TOKDNE
+   before USBRST and SLEEP for this reason. SOFTOK was also never cleared, so
+   `ISTAT` never read zero.
+5. **`CTL` was read-modify-written.** `TXSUSPENDTOKENBUSY` reads as 1 while
+   frozen, so `modify()` fed that bit straight back and re-asserted the
+   freeze — including inside `reset()`, where the ODDRST sequence ran twice.
+   `usb_dev.c` only ever assigns `CTL` whole. This was the one that kept
+   `CTL` pinned at 0xA1 through every other fix.
+6. **Only the EVEN RX bank was armed, and `read()` re-armed the wrong one.**
+   The controller owns the ping-pong sequence; firmware does not choose the
+   bank. The reference arms EVEN *and* ODD on reset and gives back the bank
+   that just completed. Arming one bank and advancing a separate counter
+   desynchronises after the very first packet, so the second SETUP the host
+   sends lands on an unowned bank and is never received.
+7. **A SETUP left stale TX descriptors armed.** `usb_dev.c` zeroes both EP0
+   TX BDs on every SETUP; without that, an IN from an abandoned transfer
+   answers the next IN token. Note the TX *bank pointer* must NOT be reset
+   here — the controller never consumed those banks, so its own pointer has
+   not moved.
+
+Also fixed while here: the USB clock divider was hard-coded to the 120 MHz
+PLL values, so a stock 72 MHz Teensy 3.1/3.2 would have clocked USB at
+28.8 MHz and never enumerated. `usb_bus()` now takes `&Clocks` and derives
+USBFRAC/USBDIV from the configured PLL (72, 96 or 120 MHz). This is a
+breaking signature change, shipped in 0.2.0.
+
+`mk20dx-testsuite/tests/usb.rs` passes 6/6 again.
+
+Still open: `EP_BUFS` plus the BDT is a fixed 4.6 KB of statics for 16
+endpoints whatever the class uses. On the FLXS1 that cut the application's
+stack from about 13.5 KB to 6 KB. Sizing the pool by the endpoints actually
+allocated is wanted; a MIDI device needs 3.
+
+---
+
+### 2026-09-11 — first real hardware bring-up attempt (superseded by the entry above)
+
+Phase 11 was marked complete from register-level tests only. The first
+attempt to enumerate on hardware (FLXS1 board, MK20DX256 at a 120 MHz PLL,
+macOS host) found three real defects. All three fixes are in the working
+tree and **uncommitted** as of 2026-09-14; `src/usb.rs` is the only
+modified file.
+
+1. **No D+ pull-up.** `enable()` never wrote `USB0_CONTROL[DPPULLUPNONOTG]`,
+   so no host could ever see an attach. The comment claiming the pull-up is
+   automatic in non-OTG mode is wrong. Verified: the host saw nothing at all
+   before the fix, and `CONTROL` reads 0x10 with the bus in the J state after.
+2. **Wrong USB clock at 120 MHz.** See the clock section above. Verified by
+   inspection of the two CLKDIV2 writes; not independently measured.
+3. **`suspend()` asserted `USBCTRL[SUSP]`.** On this controller that bit makes
+   the transceiver ignore everything except resume signalling, so the host's
+   bus reset after the idle gap that follows attach was never seen. Verified:
+   `USBCTRL` read 0x80 with `ADDR` 0 forever; after making `suspend()` a
+   no-op, `USBCTRL` reads 0. The reference driver writes `USBCTRL` once at
+   init and never again.
+
+Also added to match the reference driver's init order: the module reset
+(`USBTRC0 = 0x80`, spin until clear) and the undocumented `USBTRC0 = 0x40`
+bit, both before `CTL` is enabled.
+
+**This was the open item; it is now fixed — see the 2026-09-14 entry above.**
+The device attaches, the host resets it and sends tokens, but the device
+address is never set, so no enumeration. Evidence, sampled from firmware into RAM and read over SWD
+(live peripheral reads are impossible because the probe attaches with the
+chip in reset): `CTL` 0xA1 (enabled, J state, token-busy), `CONTROL` 0x10,
+sticky `ISTAT` 0x1D = bus reset + start-of-frame + token-done + sleep,
+`ADDR` 0, poll counter advancing. So the controller runs and the control
+transfers themselves do not complete. Unverified suspicion, in order:
+endpoint-0 ping-pong bank and data-toggle handling in `poll()`, `write()`
+and `read()`; the stale comment above `QUIRK_SET_ADDRESS_BEFORE_STATUS`
+that contradicts its `false` value; the host-side poll period. Compare
+against the Teensy `usb_dev.c` token handling.
+
+Proof the same board and cable enumerate: the vendor C firmware
+(`FLXS1_C/firmware_files/flxs1_20b6-1-g9bf59ef.hex`) enumerates as
+16c0:0489. The hardware path is not in question.
+
+A second, independent limitation: `EP_BUFS` plus the BDT is a fixed 4.6 KB
+of statics for 16 endpoints whatever the class uses. On the FLXS1 that cut
+the application's stack from about 13.5 KB to 6 KB. Sizing the pool by the
+endpoints actually allocated is wanted; a MIDI device needs 3.
 
 Reference: K20 ref manual chapter 34 (USB OTG / USB-FS)
 

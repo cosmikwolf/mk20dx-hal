@@ -218,7 +218,7 @@ pub fn calc_baud(module_clk: u32, baudrate: u32) -> (u16, u8) {
 impl<UART: sealed::UartInstance> Serial<UART> {
     fn init(config: Config, module_clk: u32) -> Self {
         let uart = regs::<UART>();
-        let (sbr, brfa) = calc_baud(module_clk, config.baudrate.raw());
+        let (sbr, brfa) = calc_baud(module_clk, config.baudrate.to_raw());
 
         // Disable TX and RX during configuration
         // SAFETY: Writing 0 disables all C2 features (TX, RX, interrupts).
@@ -607,7 +607,7 @@ macro_rules! uart_ext_impl {
                 sim: &pac::Sim,
             ) -> Serial<$Instance> {
                 <$Instance as sealed::UartInstance>::enable_clock(sim);
-                Serial::<$Instance>::init(config, clocks.$clock_method().raw())
+                Serial::<$Instance>::init(config, clocks.$clock_method().to_raw())
             }
         }
     };

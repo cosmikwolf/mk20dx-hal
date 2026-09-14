@@ -168,7 +168,7 @@ macro_rules! spi_impl {
 
             fn init(config: Config, bus_clk: u32) -> Self {
                 let spi = Self::regs();
-                let (br, pbr, dbr) = calc_baud(bus_clk, config.baudrate.raw());
+                let (br, pbr, dbr) = calc_baud(bus_clk, config.baudrate.to_raw());
 
                 // 1. Halt + Master mode + Enable module clocks, all PCS inactive high.
                 // PCSIS is a per-line bitmask: bit x sets the inactive state of PCSx.
@@ -553,7 +553,7 @@ macro_rules! spi_impl {
                 sim: &pac::Sim,
             ) -> Spi<$Instance> {
                 sim.scgc6().modify(|_, w| w.$scgc_field().enabled());
-                Spi::<$Instance>::init(config, clocks.bus_clk().raw())
+                Spi::<$Instance>::init(config, clocks.bus_clk().to_raw())
             }
         }
     };

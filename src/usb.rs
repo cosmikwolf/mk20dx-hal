@@ -30,6 +30,7 @@
 
 use core::cell::UnsafeCell;
 
+use crate::clocks::Clocks;
 use crate::pac;
 use usb_device::bus::{PollResult, UsbBus as UsbBusTrait};
 use usb_device::endpoint::{EndpointAddress, EndpointType};
@@ -54,6 +55,7 @@ const PID_SETUP: u8 = 0x0D;
 // ISTAT bit positions
 const ISTAT_USBRST: u8 = 1 << 0;
 const ISTAT_ERROR: u8 = 1 << 1;
+const ISTAT_SOFTOK: u8 = 1 << 2;
 const ISTAT_TOKDNE: u8 = 1 << 3;
 const ISTAT_SLEEP: u8 = 1 << 4;
 const ISTAT_RESUME: u8 = 1 << 5;
@@ -188,9 +190,9 @@ struct EndpointState {
     // DATA0/DATA1 toggle tracking
     tx_data_toggle: bool,
     rx_data_toggle: bool,
-    // Ping-pong bank tracking
+    // Ping-pong bank tracking. TX only: firmware picks the TX bank, but the
+    // controller picks the RX bank, so RX needs no counter — see read().
     tx_odd: bool,
-    rx_odd: bool,
     // Whether there is unread data in the RX buffer
     rx_ready: bool,
     // Which bank the completed RX data is in
@@ -209,7 +211,6 @@ impl EndpointState {
             tx_data_toggle: false,
             rx_data_toggle: false,
             tx_odd: false,
-            rx_odd: false,
             rx_ready: false,
             rx_complete_odd: false,
             rx_setup: false,
@@ -268,6 +269,12 @@ impl UsbBus {
         unsafe { &*self.inner.get() }
     }
 
+    // `UsbBus` must hand out `&mut Inner` from `&self`: every `UsbBusTrait`
+    // method takes `&self`, yet the driver has to mutate endpoint state. The
+    // aliasing rule is upheld by the caller, not the type system — see the
+    // `inner()` safety note — so the lint is allowed here rather than papered
+    // over with a `RefCell` whose borrow checks could panic inside an ISR.
+    #[allow(clippy::mut_from_ref)]
     fn inner_mut(&self) -> &mut Inner {
         // SAFETY: Same invariant as inner(). Single-core, single-context USB access.
         unsafe { &mut *self.inner.get() }
@@ -297,14 +304,18 @@ impl UsbBus {
         ep0.tx_data_toggle = false;
         ep0.rx_data_toggle = false;
         ep0.tx_odd = false;
-        ep0.rx_odd = false;
         ep0.rx_ready = false;
         ep0.rx_setup = false;
         ep0.stalled_in = false;
         ep0.stalled_out = false;
 
-        // Arm RX EVEN for EP0
+        // Arm BOTH RX banks. The controller ping-pongs between them on its
+        // own; firmware never chooses the bank. The reference driver
+        // (Teensy usb_dev.c, USBRST handler) arms EVEN and ODD here for the
+        // same reason. Arming only EVEN means the second packet the host
+        // sends lands on an unowned ODD bank and is never received.
         self.arm_rx(0, false);
+        self.arm_rx(0, true);
 
         let usb = usb_regs();
         // EP0: handshake, TX, RX enabled (control endpoint)
@@ -317,8 +328,13 @@ impl UsbBus {
 }
 
 impl UsbBusTrait for UsbBus {
-    // The Kinetis USB-FS sets the address immediately, so we need
-    // set_device_address called before the status stage completes.
+    // The Kinetis USB-FS latches ADDR as soon as it is written, so the write
+    // must happen *after* the status-stage IN is acknowledged — a write during
+    // the data stage would move the device mid-transfer and the host would
+    // never see the handshake. `false` asks usb-device for exactly that
+    // ordering. The reference driver does the same: usb_dev.c writes
+    // `USB0_ADDR = setup.wValue` in its "IN transaction completed" case, not
+    // in usb_setup(), where SET_ADDRESS is an empty arm of the switch.
     const QUIRK_SET_ADDRESS_BEFORE_STATUS: bool = false;
 
     // --- Endpoint Allocation ---
@@ -390,23 +406,8 @@ impl UsbBusTrait for UsbBus {
         });
 
         // Configure USB clock divider: USB_CLK = PLL × (USBFRAC+1) / (USBDIV+1)
-        #[cfg(feature = "mk20d7")]
-        {
-            // SAFETY: USBDIV is a 3-bit field; value 2 fits.
-            // 72 MHz PLL: 72 × 2/3 = 48 MHz (USBFRAC=1, USBDIV=2)
-            sim.clkdiv2().write(|w| unsafe {
-                w.usbfrac().set_bit()
-                 .usbdiv().bits(2)
-            });
-        }
-        #[cfg(feature = "mk20d5")]
-        {
-            // SAFETY: USBDIV is a 3-bit field; value 0 fits.
-            // 48 MHz PLL: 48 × 1/1 = 48 MHz (USBFRAC=0, USBDIV=0)
-            sim.clkdiv2().write(|w| unsafe {
-                w.usbdiv().bits(0)
-            });
-        }
+        // The divider was programmed by `usb_bus()`, which has the `Clocks`
+        // token needed to pick it. Nothing to redo here.
 
         // Enable USB clock gate
         sim.scgc4().modify(|_, w| w.usbotg().enabled());
@@ -415,6 +416,18 @@ impl UsbBusTrait for UsbBus {
 
         // SAFETY: bdtba fields accept the respective address bits. The BDT
         // static is 512-byte aligned (repr(C, align(512))).
+        // Reset the USB module before configuring it, as the reference
+        // driver does (USBTRC0[USBRESET], self-clearing). Without it the SIE
+        // can come up stalled (CTL[TXSUSPENDTOKENBUSY] stuck set).
+        // SAFETY: USBTRC0 is an 8-bit register; 0x80 is USBRESET.
+        usb.usbtrc0().write(|w| unsafe { w.bits(0x80) });
+        while usb.usbtrc0().read().bits() & 0x80 != 0 {}
+
+        // Undocumented bit the reference driver sets before enabling the
+        // module (Freescale/Teensy usb_init: USB0_USBTRC0 |= 0x40).
+        // SAFETY: 8-bit register, valid value.
+        usb.usbtrc0().write(|w| unsafe { w.bits(0x40) });
+
         // Set BDT base address
         let bdt_addr = &raw const BDT as u32;
         usb.bdtpage1().write(|w| unsafe { w.bdtba().bits(((bdt_addr >> 9) & 0x7F) as u8) });
@@ -448,8 +461,12 @@ impl UsbBusTrait for UsbBus {
         // Enable USB module (non-OTG mode: D+ pullup is automatic)
         usb.ctl().write(|w| w.usbensofen()._1());
 
-        // Use non-OTG mode: OTGEN=0 means D+ pullup is controlled by USBENSOFEN
+        // Use non-OTG mode: OTGEN=0 means the D+ pullup is controlled by CONTROL
         usb.otgctl().write(|w| w.otgen()._0());
+
+        // Enable the D+ pullup: this is what signals the attach to the host.
+        // Without it the device never enumerates.
+        usb.control().write(|w| w.dppullupnonotg().set_bit());
     }
 
     fn reset(&self) {
@@ -466,17 +483,22 @@ impl UsbBusTrait for UsbBus {
             bdt_write(i, 0, 0);
         }
 
-        // Reset ODD toggle
-        usb.ctl().modify(|_, w| w.oddrst().set_bit());
-        // Immediately clear ODDRST
-        usb.ctl().modify(|_, w| w.oddrst().clear_bit());
+        // CTL is written whole, never read-modify-written.
+        // CTL[TXSUSPENDTOKENBUSY] reads as 1 while the controller is frozen on
+        // a SETUP token; a read-modify-write feeds that bit straight back and
+        // re-asserts the freeze, so the device stops answering the host and
+        // never recovers. usb_dev.c only ever assigns CTL whole, for this
+        // reason. `write` yields the reset value (0) for every field not named.
+        // Reset the ping-pong ODD toggle, then re-enable. Matches
+        // usb_dev.c's `USB0_CTL = USB_CTL_ODDRST` / `= USB_CTL_USBENSOFEN`.
+        usb.ctl().write(|w| w.oddrst().set_bit());
+        usb.ctl().write(|w| w.usbensofen()._1());
 
         // Reset all endpoint state
         for i in 0..NUM_ENDPOINTS {
             inner.endpoints[i].tx_data_toggle = false;
             inner.endpoints[i].rx_data_toggle = false;
             inner.endpoints[i].tx_odd = false;
-            inner.endpoints[i].rx_odd = false;
             inner.endpoints[i].rx_ready = false;
             inner.endpoints[i].rx_setup = false;
             inner.endpoints[i].stalled_in = false;
@@ -504,8 +526,9 @@ impl UsbBusTrait for UsbBus {
 
             let is_control = ep_type == EndpointType::Control;
 
-            // Arm RX buffer
+            // Arm both RX banks — see configure_ep0().
             self.arm_rx(i, false);
+            self.arm_rx(i, true);
 
             usb.endpt(i).write(|w| {
                 let w = w.ephshk().set_bit()
@@ -624,16 +647,31 @@ impl UsbBusTrait for UsbBus {
 
         // After SETUP, reset data toggle to DATA1 for the data phase
         if bd_pid(bd_desc) == PID_SETUP {
+            // A SETUP cancels whatever control transfer was in flight. Drop
+            // any TX descriptor still owned by the controller, or a leftover
+            // IN from an abandoned transfer answers the next IN token with
+            // stale data. Matches usb_dev.c, which zeroes both EP0 TX BDs
+            // on every SETUP.
+            bdt_write(bdt_index(ep, true, false), 0, 0);
+            bdt_write(bdt_index(ep, true, true), 0, 0);
+            // NOTE: `tx_odd` is deliberately NOT reset here. Clearing the
+            // descriptors does not move the controller's own TX ping-pong
+            // pointer — it never consumed those banks — so forcing the
+            // software pointer back to EVEN would desynchronise the two.
+            // usb_dev.c leaves `ep0_tx_bdt_bank` alone on SETUP for the same
+            // reason; it only resets it on bus reset, alongside ODDRST.
+            // The first IN after a SETUP is always DATA1.
             state.tx_data_toggle = true;
             state.rx_data_toggle = true;
         } else {
             state.rx_data_toggle = !state.rx_data_toggle;
         }
 
-        // Re-arm the RX buffer on the NEXT odd bank
-        let next_odd = state.rx_odd;
-        self.arm_rx(ep, next_odd);
-        state.rx_odd = !state.rx_odd;
+        // Re-arm the bank that just completed. The controller owns the
+        // ping-pong sequence, so the bank to give back is always the one it
+        // just handed us (`rx_complete_odd`) — never a separately tracked
+        // counter, which desynchronises after the first packet.
+        self.arm_rx(ep, odd);
 
         Ok(count)
     }
@@ -666,9 +704,9 @@ impl UsbBusTrait for UsbBus {
                 UsbDirection::In => state.tx_data_toggle = false,
                 UsbDirection::Out => {
                     state.rx_data_toggle = false;
-                    // Re-arm RX
-                    let odd = state.rx_odd;
-                    self.arm_rx(ep, odd);
+                    // Re-arm both banks, as after a reset.
+                    self.arm_rx(ep, false);
+                    self.arm_rx(ep, true);
                 }
             }
         }
@@ -689,9 +727,12 @@ impl UsbBusTrait for UsbBus {
     // --- Power Management ---
 
     fn suspend(&self) {
-        let usb = usb_regs();
-        // Put transceiver into suspend state
-        usb.usbctrl().modify(|_, w| w.susp()._1());
+        // Deliberately does NOT set USBCTRL[SUSP]. On this controller that
+        // bit makes the transceiver ignore everything but resume signalling,
+        // so a host bus reset after the idle gap that follows attach is never
+        // seen and the device never enumerates (observed: USBCTRL 0x80 with
+        // ADDR 0 forever). The reference driver writes USBCTRL once at init
+        // and never again.
     }
 
     fn resume(&self) {
@@ -717,16 +758,20 @@ impl UsbBusTrait for UsbBus {
             return PollResult::Reset;
         }
 
-        // --- Suspend (sleep) ---
-        if istat & ISTAT_SLEEP != 0 {
-            usb.istat().write(|w| unsafe { w.bits(ISTAT_SLEEP) });
-            return PollResult::Suspend;
-        }
+        // NOTE: SLEEP and RESUME are deliberately handled *after* the token
+        // loop below, not here. A SETUP token freezes the controller
+        // (CTL[TXSUSPENDTOKENBUSY]) until firmware clears the freeze, which
+        // only happens in that loop. Returning Suspend first livelocks the
+        // device: frozen -> no response -> bus goes idle -> SLEEP sets ->
+        // poll returns early again -> the freeze is never cleared. The
+        // reference driver services TOKDNE before USBRST and SLEEP for the
+        // same reason (usb_dev.c: TOKDNE at the top of the ISR, USBRST far
+        // below it).
 
-        // --- Resume ---
-        if istat & ISTAT_RESUME != 0 {
-            usb.istat().write(|w| unsafe { w.bits(ISTAT_RESUME) });
-            return PollResult::Resume;
+        // --- Start of frame ---
+        // Nothing to do, but it must be cleared or ISTAT never reads zero.
+        if istat & ISTAT_SOFTOK != 0 {
+            usb.istat().write(|w| unsafe { w.bits(ISTAT_SOFTOK) });
         }
 
         // --- Stall ---
@@ -777,40 +822,66 @@ impl UsbBusTrait for UsbBus {
                 if pid == PID_SETUP {
                     ep_setup |= 1 << ep;
                     state.rx_setup = true;
-                    // After SETUP, unfreeze (clear TXSUSPENDTOKENBUSY)
-                    usb.ctl().modify(|_, w| w.txsuspendtokenbusy().clear_bit());
-                } else {
-                    ep_out |= 1 << ep;
+                    state.rx_ready = true;
+                    state.rx_complete_odd = is_odd;
+                    // After SETUP, unfreeze (clear TXSUSPENDTOKENBUSY).
+                    // Whole-register write — see reset(). This both clears
+                    // the freeze and leaves USBENSOFEN set.
+                    usb.ctl().write(|w| w.usbensofen()._1());
+                    // Stop here. Clearing the freeze lets the controller run
+                    // again, so continuing the loop could consume the status
+                    // stage of this very transfer before usb-device has read
+                    // the SETUP — and a second SETUP would overwrite
+                    // `rx_complete_odd`, losing the first packet. The
+                    // reference driver handles one token per interrupt for
+                    // the same reason. Remaining tokens are picked up by the
+                    // next poll().
+                    break;
                 }
 
+                ep_out |= 1 << ep;
                 state.rx_ready = true;
                 state.rx_complete_odd = is_odd;
             }
         }
 
         if ep_out != 0 || ep_in_complete != 0 || ep_setup != 0 {
-            PollResult::Data {
+            return PollResult::Data {
                 ep_out,
                 ep_in_complete,
                 ep_setup,
-            }
-        } else {
-            PollResult::None
+            };
         }
+
+        // Only once no token is outstanding is it safe to report a bus state
+        // change — see the note above.
+        let istat = usb.istat().read().bits();
+
+        if istat & ISTAT_SLEEP != 0 {
+            usb.istat().write(|w| unsafe { w.bits(ISTAT_SLEEP) });
+            return PollResult::Suspend;
+        }
+
+        if istat & ISTAT_RESUME != 0 {
+            usb.istat().write(|w| unsafe { w.bits(ISTAT_RESUME) });
+            return PollResult::Resume;
+        }
+
+        PollResult::None
     }
 
     fn force_reset(&self) -> usb_device::Result<()> {
         let usb = usb_regs();
 
-        // Disable USB to drop D+ pullup
-        usb.ctl().modify(|_, w| w.usbensofen()._0());
+        // Disable USB to drop D+ pullup (whole-register write — see reset()).
+        usb.ctl().write(|w| w.usbensofen()._0());
 
         // Short delay for host to detect disconnect
         // (~10ms bus timeout, we just need a noticeable gap)
         cortex_m::asm::delay(72_000 * 10);
 
-        // Re-enable USB
-        usb.ctl().modify(|_, w| w.usbensofen()._1());
+        // Re-enable USB (whole-register write — see reset()).
+        usb.ctl().write(|w| w.usbensofen()._1());
 
         Ok(())
     }
@@ -822,6 +893,27 @@ impl UsbBusTrait for UsbBus {
 
 /// Extension trait for the USB0 peripheral.
 ///
+/// USB clock divider settings: `USB_CLK = PLL x (USBFRAC+1) / (USBDIV+1)`,
+/// which must land on exactly 48 MHz.
+///
+/// Derived from the configured PLL rate rather than hard-coded, because the
+/// mk20d7 part runs at 72, 96 or 120 MHz depending on which `freeze_at`
+/// preset was used, and each needs a different divider. Getting this wrong
+/// does not fail loudly — the module simply clocks at the wrong rate and the
+/// host never enumerates the device.
+#[cfg(feature = "mk20d7")]
+const fn usb_clk_divider(pll_hz: u32) -> Option<(bool, u8)> {
+    match pll_hz {
+        // 72 x 2/3 = 48
+        72_000_000 => Some((true, 2)),
+        // 96 x 1/2 = 48
+        96_000_000 => Some((false, 1)),
+        // 120 x 2/5 = 48
+        120_000_000 => Some((true, 4)),
+        _ => None,
+    }
+}
+
 /// Consumes the USB0 PAC peripheral, configures the USB 48 MHz clock source,
 /// enables the clock gate, and returns a [`UsbBus`] ready for use with
 /// `usb_device::bus::UsbBusAllocator`.
@@ -831,11 +923,11 @@ pub trait UsbBusExt: Sized {
     /// Configures SIM SOPT2 (PLL clock source), CLKDIV2 (USB divider),
     /// and SCGC4 (clock gate). The USB peripheral itself is initialized
     /// later when `usb-device` calls `enable()`.
-    fn usb_bus(self, sim: &pac::Sim) -> UsbBus;
+    fn usb_bus(self, sim: &pac::Sim, clocks: &Clocks) -> UsbBus;
 }
 
 impl UsbBusExt for pac::Usb0 {
-    fn usb_bus(self, sim: &pac::Sim) -> UsbBus {
+    fn usb_bus(self, sim: &pac::Sim, clocks: &Clocks) -> UsbBus {
         // Select PLL as source for USB clock
         sim.sopt2().modify(|_, w| {
             w.pllfllsel().pll()
@@ -845,17 +937,21 @@ impl UsbBusExt for pac::Usb0 {
         // Configure USB clock divider: USB_CLK = PLL × (USBFRAC+1) / (USBDIV+1)
         #[cfg(feature = "mk20d7")]
         {
-            // SAFETY: USBDIV is a 3-bit field; value 2 fits.
-            // 72 MHz PLL: 72 × 2/3 = 48 MHz (USBFRAC=1, USBDIV=2)
+            let (frac, div) = match usb_clk_divider(clocks.core_clk().to_raw()) {
+                Some(v) => v,
+                None => panic!("USB needs a 72, 96 or 120 MHz PLL to reach 48 MHz"),
+            };
+            // SAFETY: USBDIV is a 3-bit field; usb_clk_divider only yields 1, 2 or 4.
             sim.clkdiv2().write(|w| unsafe {
-                w.usbfrac().set_bit()
-                 .usbdiv().bits(2)
+                w.usbfrac().bit(frac)
+                 .usbdiv().bits(div)
             });
         }
         #[cfg(feature = "mk20d5")]
         {
+            let _ = clocks;
             // SAFETY: USBDIV is a 3-bit field; value 0 fits.
-            // 48 MHz PLL: 48 × 1/1 = 48 MHz (USBFRAC=0, USBDIV=0)
+            // 48 MHz PLL: 48 x 1/1 = 48 MHz (USBFRAC=0, USBDIV=0)
             sim.clkdiv2().write(|w| unsafe {
                 w.usbdiv().bits(0)
             });

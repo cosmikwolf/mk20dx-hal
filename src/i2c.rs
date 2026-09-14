@@ -151,7 +151,7 @@ pub fn calc_frequency(bus_clk: u32, target: u32) -> (u8, u8) {
 impl<I2C: sealed::I2cInstance> I2c<I2C> {
     fn init(config: Config, bus_clk: u32) -> Self {
         let i2c = regs::<I2C>();
-        let (icr, mult) = calc_frequency(bus_clk, config.frequency.raw());
+        let (icr, mult) = calc_frequency(bus_clk, config.frequency.to_raw());
 
         // Disable I2C during configuration
         i2c.c1().write(|w| w.iicen()._0());
@@ -470,7 +470,7 @@ impl<SCL: I2c0SclPin, SDA: I2c0SdaPin> I2cExt<SCL, SDA> for pac::I2c0 {
         sim: &pac::Sim,
     ) -> I2c<I2c0> {
         <I2c0 as sealed::I2cInstance>::enable_clock(sim);
-        I2c::<I2c0>::init(config, clocks.bus_clk().raw())
+        I2c::<I2c0>::init(config, clocks.bus_clk().to_raw())
     }
 }
 
@@ -487,7 +487,7 @@ impl<SCL: I2c1SclPin, SDA: I2c1SdaPin> I2cExt<SCL, SDA> for pac::I2c1 {
         sim: &pac::Sim,
     ) -> I2c<I2c1> {
         <I2c1 as sealed::I2cInstance>::enable_clock(sim);
-        I2c::<I2c1>::init(config, clocks.bus_clk().raw())
+        I2c::<I2c1>::init(config, clocks.bus_clk().to_raw())
     }
 }
 
@@ -507,7 +507,7 @@ mod async_impl {
     static I2C1_WAKER: AtomicWaker = AtomicWaker::new();
 
     fn waker_for(ptr: *const pac::i2c0::RegisterBlock) -> &'static AtomicWaker {
-        if ptr as usize == pac::I2c0::PTR as usize {
+        if core::ptr::eq(ptr, pac::I2c0::PTR) {
             &I2C0_WAKER
         } else {
             #[cfg(feature = "mk20d7")]

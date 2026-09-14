@@ -187,7 +187,7 @@ Most peripheral `::new()` methods require a `&Clocks` reference to prove clocks 
 | `cortex-m` | 0.7 | Core peripheral access (NVIC, SysTick), critical sections |
 | `cortex-m-rt` | 0.7 | Runtime (optional, via `rt` feature) |
 | `nb` | 1.1 | Non-blocking result type |
-| `fugit` | 0.3 | Duration and rate types |
+| `fugit` | 0.6 | Duration and rate types |
 | `usb-device` | 0.3 | USB device bus trait (`UsbBus`) |
 | `mk20d5` / `mk20d7` | 0.1 | PAC (selected by feature flag) |
 

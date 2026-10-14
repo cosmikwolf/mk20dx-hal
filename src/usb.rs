@@ -7,17 +7,16 @@
 //! Both MK20D5 (Teensy 3.0) and MK20D7 (Teensy 3.1/3.2) have identical USB0
 //! peripherals — no `#[cfg]` gating needed.
 //!
-//! # Usage
+//! # Usage: polling
 //!
-//! ```no_run
+//! ```ignore
 //! use mk20dx_hal::prelude::*;
 //! use usb_device::prelude::*;
 //!
 //! let dp = pac::Peripherals::take().unwrap();
-//! dp.WDOG.disable();
-//! let clocks = dp.MCG.constrain().freeze(dp.OSC, &dp.SIM);
+//! let clocks = dp.mcg.constrain().freeze(dp.osc, &dp.sim);
 //!
-//! let usb_bus = dp.USB0.usb_bus(&dp.SIM);
+//! let usb_bus = dp.usb0.usb_bus(&dp.sim, &clocks);
 //! let usb_bus_alloc = UsbBusAllocator::new(usb_bus);
 //!
 //! let mut usb_dev = UsbDeviceBuilder::new(&usb_bus_alloc, UsbVidPid(0x16c0, 0x27dd))
@@ -27,8 +26,81 @@
 //!     usb_dev.poll(&mut []);
 //! }
 //! ```
+//!
+//! # Usage: interrupt-driven (RTIC)
+//!
+//! `poll()` can run in the USB0 interrupt handler instead. The USB0 line is
+//! asserted while any `ISTAT` flag that `INTEN` enables is set, so a flag
+//! that `poll()` leaves set makes the handler run again at once. `poll()`
+//! uses that on purpose: it reports one SETUP per call (see the note in
+//! [`UsbBus::poll`](usb_device::bus::UsbBus::poll)) and leaves later tokens
+//! for the next run.
+//!
+//! [`UsbBus::enable_sof_interrupt`] adds the 1 ms start-of-frame token as an
+//! interrupt source. [`UsbBus::take_sof`] then tells the handler that a frame
+//! started, which is a good tick to send queued IN packets.
+//!
+//! ```ignore
+//! #[rtic::app(device = mk20dx_hal::pac, peripherals = true)]
+//! mod app {
+//!     use mk20dx_hal::prelude::*;
+//!     use mk20dx_hal::usb::UsbBus;
+//!     use usb_device::class_prelude::UsbBusAllocator;
+//!     use usb_device::prelude::*;
+//!     use usbd_midi::UsbMidiClass;
+//!
+//!     #[shared]
+//!     struct Shared {}
+//!
+//!     #[local]
+//!     struct Local {
+//!         usb_dev: UsbDevice<'static, UsbBus>,
+//!         midi: UsbMidiClass<'static, UsbBus>,
+//!     }
+//!
+//!     #[init(local = [usb_alloc: Option<UsbBusAllocator<UsbBus>> = None])]
+//!     fn init(cx: init::Context) -> (Shared, Local) {
+//!         let dp = cx.device;
+//!         // The WDOG unlock belongs in #[pre_init], not here: see `watchdog`.
+//!         let clocks = dp.mcg.constrain().freeze(dp.osc, &dp.sim);
+//!
+//!         let usb_bus = dp.usb0.usb_bus(&dp.sim, &clocks);
+//!         usb_bus.enable_sof_interrupt(true);
+//!         let alloc: &'static _ = cx.local.usb_alloc.insert(UsbBusAllocator::new(usb_bus));
+//!
+//!         let midi = UsbMidiClass::new(alloc, 1, 1).unwrap();
+//!         let usb_dev = UsbDeviceBuilder::new(alloc, UsbVidPid(0x16c0, 0x0485)).build();
+//!
+//!         // RTIC unmasks USB0 when init returns. Nothing calls the bus before that.
+//!         (Shared {}, Local { usb_dev, midi })
+//!     }
+//!
+//!     // The only context that touches the bus: see the safety note on `UsbBus`.
+//!     #[task(binds = USB0, priority = 2, local = [usb_dev, midi])]
+//!     fn usb0(cx: usb0::Context) {
+//!         let usb_dev = cx.local.usb_dev;
+//!         let midi = cx.local.midi;
+//!         usb_dev.poll(&mut [&mut *midi]);
+//!
+//!         let mut buf = [0u8; 64];
+//!         if let Ok(n) = midi.read(&mut buf) {
+//!             // Read OUT data here. TOKDNE is already clear, so no second
+//!             // interrupt comes for data that this run does not read.
+//!             let _ = &buf[..n];
+//!         }
+//!
+//!         if usb_dev.bus().take_sof() {
+//!             // A frame started (1 ms). Send the queued IN packets here.
+//!         }
+//!     }
+//! }
+//! ```
+//!
+//! Without RTIC, put the same body in a `#[cortex_m_rt::interrupt] fn USB0()`
+//! and unmask `pac::Interrupt::USB0` in the NVIC after the device is built.
 
 use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::clocks::Clocks;
 use crate::pac;
@@ -69,6 +141,17 @@ fn usb_regs() -> &'static pac::usb0::RegisterBlock {
     // SAFETY: PTR is a valid pointer to the USB0 register block, which is
     // memory-mapped I/O that exists for the lifetime of the program.
     unsafe { &*pac::Usb0::PTR }
+}
+
+/// Read-modify-write `INTEN` with interrupts masked. `poll()` changes
+/// RESUMEEN from the USB context while `enable_sof_interrupt()` may change
+/// SOFTOKEN from another one; the critical section keeps both changes.
+fn inten_modify(
+    f: impl FnOnce(&mut pac::usb0::inten::W) -> &mut pac::usb0::inten::W,
+) {
+    cortex_m::interrupt::free(|_| {
+        usb_regs().inten().modify(|_, w| f(w));
+    });
 }
 
 fn sim_regs() -> &'static pac::sim::RegisterBlock {
@@ -187,9 +270,9 @@ struct EndpointState {
     max_packet_size: u16,
     stalled_in: bool,
     stalled_out: bool,
-    // DATA0/DATA1 toggle tracking
+    // DATA0/DATA1 toggle tracking, TX only. The RX toggle follows from the
+    // bank: see rx_bank_data1().
     tx_data_toggle: bool,
-    rx_data_toggle: bool,
     // Ping-pong bank tracking. TX only: firmware picks the TX bank, but the
     // controller picks the RX bank, so RX needs no counter — see read().
     tx_odd: bool,
@@ -209,7 +292,6 @@ impl EndpointState {
             stalled_in: false,
             stalled_out: false,
             tx_data_toggle: false,
-            rx_data_toggle: false,
             tx_odd: false,
             rx_ready: false,
             rx_complete_odd: false,
@@ -245,13 +327,33 @@ impl Inner {
 /// Created by calling [`UsbBusExt::usb_bus`] on the USB0 PAC peripheral.
 /// Interior mutability is used because the `UsbBus` trait requires `&self`
 /// for most methods after the allocation phase.
+///
+/// # One context only
+///
+/// Every `usb_device` call on this bus (`UsbDevice::poll`, class reads and
+/// writes, endpoint calls) must come from one execution context: either a
+/// polling loop, or the USB0 interrupt handler. Do not mix them, and do not
+/// call the bus from a second interrupt. The driver does not lock its
+/// endpoint state.
+///
+/// [`enable_sof_interrupt`](Self::enable_sof_interrupt),
+/// [`take_sof`](Self::take_sof) and [`frame_number`](Self::frame_number) are
+/// the exceptions: they touch only atomics and registers, so any context can
+/// call them.
 pub struct UsbBus {
     inner: UnsafeCell<Inner>,
+    /// SOFTOKEN is wanted in `INTEN`. Kept here because `enable()` resets the
+    /// module, which clears `INTEN`, and must then write it back.
+    sof_irq: AtomicBool,
+    /// A SOF token arrived since the last `take_sof()`. Set by `poll()`.
+    sof_pending: AtomicBool,
 }
 
-// SAFETY: Single-core Cortex-M4 with no preemptive threading. The USB bus
-// is accessed from a single context (the USB polling loop). The UnsafeCell
-// interior mutability is safe because there is no concurrent access.
+// SAFETY: Single-core Cortex-M4. The application calls the bus from a single
+// context only — the polling loop or the USB0 interrupt handler, never both
+// (see "One context only" above). The UnsafeCell interior mutability is
+// safe because there is then no concurrent access. The fields that other
+// contexts may touch are atomics.
 unsafe impl Send for UsbBus {}
 unsafe impl Sync for UsbBus {}
 
@@ -259,13 +361,53 @@ impl UsbBus {
     fn new() -> Self {
         Self {
             inner: UnsafeCell::new(Inner::new()),
+            sof_irq: AtomicBool::new(false),
+            sof_pending: AtomicBool::new(false),
+        }
+    }
+
+    /// Enable or disable the start-of-frame (SOF) interrupt.
+    ///
+    /// The host sends a SOF token every 1 ms while the bus is active. With
+    /// this on, each one runs the USB0 handler, and [`take_sof`](Self::take_sof)
+    /// returns `true` after the next `poll()`. Off by default.
+    ///
+    /// Call it before or after the device is built. The setting survives a
+    /// USB bus reset.
+    pub fn enable_sof_interrupt(&self, enable: bool) {
+        self.sof_irq.store(enable, Ordering::Relaxed);
+        // The clock gate is on: `usb_bus()` set it before this value exists.
+        inten_modify(|w| w.softoken().bit(enable));
+    }
+
+    /// Return `true` once for each `poll()` that saw a SOF token, and clear the flag.
+    ///
+    /// Several frames between two calls give one `true`. Use
+    /// [`frame_number`](Self::frame_number) to count them.
+    pub fn take_sof(&self) -> bool {
+        self.sof_pending.swap(false, Ordering::Relaxed)
+    }
+
+    /// The 11-bit frame number of the last SOF token (`FRMNUMH:FRMNUML`).
+    ///
+    /// It increments once each 1 ms and wraps at 2048.
+    pub fn frame_number(&self) -> u16 {
+        let usb = usb_regs();
+        // FRMNUML first, then FRMNUMH; reread the low byte to catch a carry
+        // between the two reads.
+        loop {
+            let lo = usb.frmnuml().read().bits();
+            let hi = usb.frmnumh().read().bits();
+            if usb.frmnuml().read().bits() == lo {
+                return (u16::from(hi & 0x07) << 8) | u16::from(lo);
+            }
         }
     }
 
     fn inner(&self) -> &Inner {
-        // SAFETY: Single-core Cortex-M4, USB accessed from one context.
-        // UsbBusTrait methods take &self but are only called from the USB
-        // polling loop. No concurrent access occurs.
+        // SAFETY: Single-core Cortex-M4. The application calls UsbBusTrait
+        // methods from one context only, the polling loop or the USB0
+        // interrupt handler. No concurrent access occurs.
         unsafe { &*self.inner.get() }
     }
 
@@ -276,17 +418,25 @@ impl UsbBus {
     // over with a `RefCell` whose borrow checks could panic inside an ISR.
     #[allow(clippy::mut_from_ref)]
     fn inner_mut(&self) -> &mut Inner {
-        // SAFETY: Same invariant as inner(). Single-core, single-context USB access.
+        // SAFETY: Same invariant as inner(). Single-core; one context (the
+        // polling loop or the USB0 handler) calls the bus.
         unsafe { &mut *self.inner.get() }
     }
 
-    /// Arm an RX buffer descriptor for the given endpoint.
-    fn arm_rx(&self, ep: usize, odd: bool) {
+    /// Stop the RESUME interrupt and drop a stale RESUME flag. Outside
+    /// suspend the flag follows DP/DM activity, so it must stay off.
+    fn disable_resume_irq(&self) {
+        inten_modify(|w| w.resumeen()._0());
+        usb_regs().istat().write(|w| unsafe { w.bits(ISTAT_RESUME) });
+    }
+
+    /// Arm an RX buffer descriptor for the given endpoint, expecting `data1`.
+    fn arm_rx(&self, ep: usize, odd: bool, data1: bool) {
         let state = &self.inner().endpoints[ep];
         let idx = bdt_index(ep, false, odd);
         let desc = make_bd_desc(
             state.max_packet_size,
-            state.rx_data_toggle,
+            data1,
             true, // OWN = USB
             true, // DTS
             false,
@@ -297,12 +447,37 @@ impl UsbBus {
         bdt_write(idx, desc, buf_addr);
     }
 
+    /// Arm both RX banks of an endpoint, as after a bus reset.
+    ///
+    /// With DTS set, a packet whose DATA0/DATA1 PID does not match the bank
+    /// is dropped. The controller alternates banks and the host alternates
+    /// the PID, so on a bulk or interrupt endpoint EVEN always takes DATA0
+    /// and ODD always takes DATA1 (usb_dev.c: `BDT_DESC(64, 0)` on EVEN,
+    /// `BDT_DESC(64, 1)` on ODD). Arming both with DATA0 drops every
+    /// second OUT packet. A control endpoint starts with DATA0 in both
+    /// banks for the SETUP (usb_dev.c USBRST handler).
+    fn arm_rx_both(&self, ep: usize) {
+        let control = self.inner().endpoints[ep].ep_type == Some(EndpointType::Control);
+        self.arm_rx(ep, false, false);
+        self.arm_rx(ep, true, !control);
+    }
+
+    /// The PID that the next packet into this RX bank carries, after the
+    /// bank completed a packet.
+    ///
+    /// Bulk and interrupt: fixed by the bank, as in `arm_rx_both()`. Control:
+    /// DATA1 for every re-arm, which is what usb_dev.c does after a SETUP
+    /// and after an OUT on EP0 (`BDT_DESC(EP0_SIZE, DATA1)`). A SETUP is
+    /// received whatever the bank expects.
+    fn rx_bank_data1(&self, ep: usize, odd: bool) -> bool {
+        self.inner().endpoints[ep].ep_type == Some(EndpointType::Control) || odd
+    }
+
     /// Configure endpoint 0 for control transfers after reset.
     fn configure_ep0(&self) {
         let inner = self.inner_mut();
         let ep0 = &mut inner.endpoints[0];
         ep0.tx_data_toggle = false;
-        ep0.rx_data_toggle = false;
         ep0.tx_odd = false;
         ep0.rx_ready = false;
         ep0.rx_setup = false;
@@ -314,8 +489,8 @@ impl UsbBus {
         // (Teensy usb_dev.c, USBRST handler) arms EVEN and ODD here for the
         // same reason. Arming only EVEN means the second packet the host
         // sends lands on an unowned ODD bank and is never received.
-        self.arm_rx(0, false);
-        self.arm_rx(0, true);
+        self.arm_rx(0, false, false);
+        self.arm_rx(0, true, false);
 
         let usb = usb_regs();
         // EP0: handshake, TX, RX enabled (control endpoint)
@@ -442,14 +617,19 @@ impl UsbBusTrait for UsbBus {
         // Enable all error sources
         usb.erren().write(|w| unsafe { w.bits(0xFF) });
 
-        // Enable interrupts: reset, token done, sleep, resume, stall, error
+        // Enable interrupts: reset, token done, sleep, stall, error, and SOF
+        // if the application asked for it. RESUME stays off: K20 RM ISTAT
+        // says "When not in suspend mode this interrupt must be disabled",
+        // because the flag follows DP/DM activity. suspend() turns it on.
+        // Matches usb_dev.c, whose INTEN has no RESUMEEN.
+        let sof = self.sof_irq.load(Ordering::Relaxed);
         usb.inten().write(|w| {
             w.usbrsten()._1()
              .erroren()._1()
              .tokdneen()._1()
              .sleepen()._1()
-             .resumeen()._1()
              .stallen()._1()
+             .softoken().bit(sof)
         });
 
         // Disable weak pulldowns, not in suspend
@@ -497,7 +677,6 @@ impl UsbBusTrait for UsbBus {
         // Reset all endpoint state
         for i in 0..NUM_ENDPOINTS {
             inner.endpoints[i].tx_data_toggle = false;
-            inner.endpoints[i].rx_data_toggle = false;
             inner.endpoints[i].tx_odd = false;
             inner.endpoints[i].rx_ready = false;
             inner.endpoints[i].rx_setup = false;
@@ -526,9 +705,8 @@ impl UsbBusTrait for UsbBus {
 
             let is_control = ep_type == EndpointType::Control;
 
-            // Arm both RX banks — see configure_ep0().
-            self.arm_rx(i, false);
-            self.arm_rx(i, true);
+            // Arm both RX banks — see configure_ep0() and arm_rx_both().
+            self.arm_rx_both(i);
 
             usb.endpt(i).write(|w| {
                 let w = w.ephshk().set_bit()
@@ -541,6 +719,9 @@ impl UsbBusTrait for UsbBus {
                 }
             });
         }
+
+        // A bus reset also ends suspend: RESUME goes off again.
+        inten_modify(|w| w.resumeen()._0());
 
         // Clear all pending interrupts
         usb.istat().write(|w| unsafe { w.bits(0xFF) });
@@ -645,7 +826,6 @@ impl UsbBusTrait for UsbBus {
         state.rx_ready = false;
         state.rx_setup = false;
 
-        // After SETUP, reset data toggle to DATA1 for the data phase
         if bd_pid(bd_desc) == PID_SETUP {
             // A SETUP cancels whatever control transfer was in flight. Drop
             // any TX descriptor still owned by the controller, or a leftover
@@ -662,16 +842,13 @@ impl UsbBusTrait for UsbBus {
             // reason; it only resets it on bus reset, alongside ODDRST.
             // The first IN after a SETUP is always DATA1.
             state.tx_data_toggle = true;
-            state.rx_data_toggle = true;
-        } else {
-            state.rx_data_toggle = !state.rx_data_toggle;
         }
 
         // Re-arm the bank that just completed. The controller owns the
         // ping-pong sequence, so the bank to give back is always the one it
         // just handed us (`rx_complete_odd`) — never a separately tracked
         // counter, which desynchronises after the first packet.
-        self.arm_rx(ep, odd);
+        self.arm_rx(ep, odd, self.rx_bank_data1(ep, odd));
 
         Ok(count)
     }
@@ -703,10 +880,10 @@ impl UsbBusTrait for UsbBus {
             match ep_addr.direction() {
                 UsbDirection::In => state.tx_data_toggle = false,
                 UsbDirection::Out => {
-                    state.rx_data_toggle = false;
-                    // Re-arm both banks, as after a reset.
-                    self.arm_rx(ep, false);
-                    self.arm_rx(ep, true);
+                    // Re-arm both banks, as after a reset. The PID stays
+                    // tied to the bank (see arm_rx_both()), as in usb_dev.c,
+                    // which does not touch the RX BDs on CLEAR_FEATURE.
+                    self.arm_rx_both(ep);
                 }
             }
         }
@@ -733,12 +910,21 @@ impl UsbBusTrait for UsbBus {
         // seen and the device never enumerates (observed: USBCTRL 0x80 with
         // ADDR 0 forever). The reference driver writes USBCTRL once at init
         // and never again.
+
+        // Now in suspend, so RESUME is the wake-up signal: turn it on. Clear
+        // the flag first, or activity from before the suspend reports a
+        // resume at once.
+        usb_regs().istat().write(|w| unsafe { w.bits(ISTAT_RESUME) });
+        inten_modify(|w| w.resumeen()._1());
     }
 
     fn resume(&self) {
         let usb = usb_regs();
         // Wake transceiver from suspend
         usb.usbctrl().modify(|_, w| w.susp()._0());
+        // Out of suspend: RESUME must be off again (see enable()). usb-device
+        // calls this for any event that ends a suspend, not only RESUME.
+        self.disable_resume_irq();
     }
 
     // --- Polling ---
@@ -768,10 +954,18 @@ impl UsbBusTrait for UsbBus {
         // same reason (usb_dev.c: TOKDNE at the top of the ISR, USBRST far
         // below it).
 
+        // Interrupt mode: every flag that INTEN enables is cleared on some
+        // path of this function, or the USB0 handler runs forever. USBRST
+        // returns above with the rest still set; the handler runs again for
+        // them. The SETUP `break` below leaves TOKDNE set on purpose, for the
+        // same reason. SLEEP and RESUME wait while a token is reported.
+
         // --- Start of frame ---
-        // Nothing to do, but it must be cleared or ISTAT never reads zero.
+        // It must be cleared or ISTAT never reads zero. Record it for
+        // take_sof(); SOFTOK sets in ISTAT whether SOFTOKEN is on or not.
         if istat & ISTAT_SOFTOK != 0 {
             usb.istat().write(|w| unsafe { w.bits(ISTAT_SOFTOK) });
+            self.sof_pending.store(true, Ordering::Relaxed);
         }
 
         // --- Stall ---
@@ -864,7 +1058,11 @@ impl UsbBusTrait for UsbBus {
 
         if istat & ISTAT_RESUME != 0 {
             usb.istat().write(|w| unsafe { w.bits(ISTAT_RESUME) });
-            return PollResult::Resume;
+            // The flag sets on any DP/DM activity, also outside suspend.
+            // Report it only while suspend() has RESUMEEN on.
+            if usb.inten().read().resumeen().bit_is_set() {
+                return PollResult::Resume;
+            }
         }
 
         PollResult::None

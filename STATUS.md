@@ -306,6 +306,37 @@ Reference: K20 ref manual chapter 21 (eDMA), chapter 22 (DMAMUX)
 - [x] No `#[cfg]` needed — both mk20d5 and mk20d7 have identical USB0
 - [x] Hardware validation: tests in `mk20dx-testsuite/tests/usb.rs` (6 tests, init/alloc only)
 
+### 2026-10-14 — interrupt-driven poll, SOF tick, RX toggle fix
+
+Requested by the flxs1 firmware, which wants `poll()` in the USB0 handler and
+the SOF token as its 1 ms send tick. `mk20dx-testsuite/tests/usb_irq.rs`
+(feature `usb-host`, host side `host/usb_midi_send.py`) checks it on the
+Teensy 3.2 at 72 MHz with a macOS host. Result, all 4 tests pass:
+
+- Configured in 238–377 ms, with `poll()` only in the handler.
+- 500 SOF runs and frame number +500 in 500 ms.
+- 500 handler runs in 500 ms with SOF on: no interrupt storm. `INTEN = 0x9f`
+  (RESUMEEN off outside suspend, SOFTOKEN on).
+- 4 of 4 Note On packets received.
+
+Found on the way: **every second bulk OUT packet was dropped.** Both RX
+banks were armed for DATA0; the ODD bank always gets the DATA1 packet, and
+DTS discards a PID mismatch. With the old arming the same test gets the
+SysEx that macOS sends on port open, then loses note 60. usb_dev.c arms
+EVEN with DATA0 and ODD with DATA1 and re-arms by bank parity. The HAL does
+that now (`arm_rx_both()`, `rx_bank_data1()`).
+
+Still open: **an 8-byte EP0 does not enumerate.** With the usb-device default
+`max_packet_size_0(8)` the host addresses the device, then stops and resets
+it about every 6 s; it never reaches `Configured`. The same happens with the
+handler pended every 20 µs, so it is not specific to interrupt mode. The
+flxs1 board and the test use 64. Not yet investigated.
+
+Test note: CoreMIDI keeps the port name per VID:PID:serial, so the test uses
+serial `mk20dx-usb-irq`; with flxs1's `0001` the port shows as `FLXS1`. A
+halted core from the last run stays enumerated, so the host script waits for
+the port to go away before it sends.
+
 ### 2026-09-14 — USB MIDI enumerates
 
 Resolved. The FLXS1 board enumerates on macOS as `Zetaohm FLXS1`

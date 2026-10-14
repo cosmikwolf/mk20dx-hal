@@ -5,6 +5,33 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added — interrupt-driven USB
+
+- `UsbBus::enable_sof_interrupt(bool)`: the 1 ms start-of-frame token as a
+  USB0 interrupt source. Off by default; it survives a bus reset.
+- `UsbBus::take_sof() -> bool`: true once after a `poll()` that saw a SOF.
+- `UsbBus::frame_number() -> u16`: the 11-bit frame number.
+- Module docs: an RTIC example with `poll()` in a `binds = USB0` task.
+
+### Fixed
+
+- Bulk/interrupt OUT dropped every second packet. Both RX banks were armed
+  for DATA0, so the DATA1 packet that lands in the ODD bank was discarded by
+  the toggle check. EVEN now expects DATA0 and ODD expects DATA1, as in
+  Teensy `usb_dev.c`; EP0 re-arms with DATA1 after each packet, as there.
+  Verified on hardware: 4 of 4 Note On packets arrive, 3 of 4 before.
+- RESUMEEN was on at all times. K20 RM ISTAT: "When not in suspend mode this
+  interrupt must be disabled." It is now on only between `suspend()` and
+  `resume()`/`reset()`, and `poll()` reports `Resume` only in that window.
+
+### Known issue
+
+- With `max_packet_size_0(8)` (the usb-device default) a macOS host stops
+  after SET_ADDRESS and the device never reaches `Configured`. Use
+  `max_packet_size_0(64)`. Not yet investigated.
+
 ## [0.2.0] - 2026-09-14
 
 Working USB, plus a dependency refresh. USB MIDI now enumerates; before this

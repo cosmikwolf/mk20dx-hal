@@ -5,6 +5,33 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-10-15
+
+### Fixed
+
+- `start_multi_channel_scan` (3+ channels): the channel-to-slot map moved
+  one step every scan, so `read_latest(i)` did not always give
+  `channels[i]`. DMA-A linked DMA-B on the minor loop only, and the eDMA
+  does not run that link on the minor loop that ends the major loop (K20 RM
+  ch21, `CITER[ELINK]`). DMA-B wrote SC1A N-1 times per N results. DMA-A now
+  links DMA-B on the minor and the major loop (`ChannelLink::Both`). Found
+  on the FLXS1 (ADC1, 4 channels, PDB 1 kHz, DMA 4/5).
+- `start_multi_channel_scan` and `start_continuous_scan` ignored
+  `ScanConfig::modulus`. They called `Pdb::load_ok()` before
+  `Pdb::enable()`, and LDOK works only while PDBEN is set (K20 RM ch35), so
+  MOD kept its reset value 0xFFFF: every scan ran at bus clock / 65536 (549
+  Hz at 72 MHz, 916 Hz at 120 MHz). The PDB is now enabled before LDOK. A
+  scan now runs at the configured rate; check timing that used the old rate.
+- `start_multi_channel_scan` docs said that the caller fills `mux_buf`. The
+  function fills it.
+
+### Known issue
+
+- `start_continuous_scan` (1-2 channels) reads the RA result register for
+  both slots and stops after the first scan. Use `start_multi_channel_scan`
+  (3+ channels; repeat a channel to fill a slot).
+- An 8-byte EP0 does not enumerate on macOS (see 0.2.1).
+
 ## [0.2.1] - 2026-10-14
 
 ### Added — interrupt-driven USB
@@ -127,5 +154,6 @@ the undocumented `USBTRC0 = 0x40` bit, before `CTL` is enabled.
 
 - Initial release.
 
+[0.2.2]: https://github.com/cosmikwolf/mk20dx-hal/releases/tag/v0.2.2
 [0.2.1]: https://github.com/cosmikwolf/mk20dx-hal/releases/tag/v0.2.1
 [0.2.0]: https://github.com/cosmikwolf/mk20dx-hal/releases/tag/v0.2.0

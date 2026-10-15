@@ -1,6 +1,6 @@
 # mk20dx-hal: Project Status
 
-**Last updated:** 2026-10-14 (0.2.1: interrupt-driven USB). Last full on-target sweep: 2026-08-31, 34 binaries, 247 tests.
+**Last updated:** 2026-10-15 (0.2.2: ADC multi-channel scan fixes). Last full on-target sweep: 2026-08-31, 34 binaries, 247 tests.
 
 ---
 
@@ -238,18 +238,19 @@ Reference: K20 ref manual chapter 36 (FTM), §36.4.15 (COMBINE), §36.4.16 (DEAD
 - [x] Macro-generated implementation for each ADC instance
 - [x] ADC1 feature-gated behind `mk20d7`
 - [x] SC3 w1c hazard avoided (write() instead of modify())
-- [x] PDB-triggered continuous scanning (1-2 channels via `start_continuous_scan()`)
+- [ ] PDB-triggered continuous scanning (1-2 channels via `start_continuous_scan()`) — **broken, see 2026-10-15**
   - [x] `ScanConfig` struct (channels, modulus, prescaler, multiplier)
   - [x] `ContinuousScan` handle with `read_latest()`, `stop()`, abort-on-drop
   - [x] PDB pre-trigger 0 + back-to-back pre-trigger 1 for 2-channel mode
   - [x] DMA reads ADC RA into results buffer, auto-wraps via `dest_last_adjust`
 - [x] Multi-channel scanning (3+ channels via `start_multi_channel_scan()`)
   - [x] `MultiChannelScan` handle with `read_latest()`, `stop()`, abort-on-drop
-  - [x] DMA minor loop channel linking: DMA-A reads results, links to DMA-B
+  - [x] DMA channel linking: DMA-A reads results, links to DMA-B on the minor and the major loop (0.2.2)
   - [x] DMA-B writes rotated mux buffer entries to SC1A (channel cycling)
   - [x] PDB fires single pre-trigger 0 continuously; DMA handles mux rotation
   - [x] `sc1a_dma_addr()` helper for DMA mux writes to SC1[0]
 - [x] Hardware validation: tests in `mk20dx-testsuite/tests/adc.rs` (10 tests, internal references)
+  and `tests/adc_scan.rs` (5 tests: multi-channel slot map for 3/4/5 channels, PDB rate)
 
 Reference: K20 ref manual chapter 31 (ADC), chapter 34 (PDB)
 
@@ -307,6 +308,29 @@ Reference: K20 ref manual chapter 21 (eDMA), chapter 22 (DMAMUX)
 - [x] Hardware validation: `mk20dx-testsuite/tests/usb.rs` (6 tests, init/alloc only) and
   `tests/usb_irq.rs` (4 tests, feature `usb-host`, needs a USB host: enumeration, SOF, MIDI OUT)
 - [ ] An 8-byte EP0 does not enumerate on macOS (see 2026-10-14); use `max_packet_size_0(64)`
+
+### 2026-10-15 — ADC multi-channel scan: slot map and rate (0.2.2)
+
+Reported by flxs1 (ADC1, channels [9, 0, 19, 3], PDB 1 kHz, DMA 4/5): one
+input at a distinct level moved between the result slots. Two bugs, both
+verified on target with `mk20dx-testsuite/tests/adc_scan.rs`:
+
+1. **The slot map moved one step every scan.** DMA-A linked DMA-B on the
+   minor loop only. RM ch21 `CITER[ELINK]`: when the major loop is exhausted
+   "this link mechanism is suppressed in favor of the MAJORELINK channel
+   linking", so DMA-B ran N-1 times per N results. Now `ChannelLink::Both`.
+   Old link: 3748/1245/1248/1250 wrong reads of 5000 per slot (4 ch); fix: 0.
+2. **The scan ignored the PDB modulus.** Both scan functions called
+   `load_ok()` before `enable()`; LDOK works only with PDBEN set (RM ch35),
+   so MOD stayed 0xFFFF: 549 Hz at a 36 MHz bus whatever the config. Now
+   `enable()` comes first. MOD=3600 gives 1000 results in 100 ms.
+
+Still open: **`start_continuous_scan` (1-2 channels) does not work.** A
+diagnostic run with [VREFSH, VREFSL] gave `results` = [1023, 1023] with
+RB = 1: the DMA reads RA for both slots. `auto_disable: true` also clears
+ERQ after the first scan, so the results never update. A multi-channel scan
+started after it on the same ADC did not run (cause not proved; the unread
+RB is the probable one). Nothing in flxs1 uses it.
 
 ### 2026-10-14 — interrupt-driven poll, SOF tick, RX toggle fix
 

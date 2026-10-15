@@ -423,8 +423,8 @@ impl<'a, const DMA_CH: u8> Drop for ContinuousScan<'a, DMA_CH> {
 /// Handle for a running multi-channel (3+) ADC scan using DMA channel linking.
 ///
 /// Uses two DMA channels: DMA-A reads ADC results into the buffer, and
-/// DMA-A's minor loop link triggers DMA-B to write the next channel
-/// number into SC1A. This cycles the ADC input mux automatically.
+/// DMA-A's channel link (minor and major loop) triggers DMA-B to write the
+/// next channel number into SC1A. This cycles the ADC input mux automatically.
 ///
 /// Dropping this value stops the scan by disabling PDB, ADC hardware
 /// trigger, and both DMA channels.
@@ -496,6 +496,12 @@ macro_rules! adc_scan_impl {
             /// PDB pre-triggers for each channel, and uses DMA to read results
             /// into the provided buffer.
             ///
+            /// **Known issue (0.2.2): this function does not work.** The DMA
+            /// reads RA for both slots, so `results[1]` holds channel 0, and
+            /// `auto_disable` stops the DMA after the first scan. Use
+            /// [`start_multi_channel_scan`](Self::start_multi_channel_scan)
+            /// with 3 or more entries (a channel can repeat).
+            ///
             /// # 2-channel path
             ///
             /// For 1-2 channels, PDB pre-trigger 0 triggers SC1A and
@@ -563,6 +569,10 @@ macro_rules! adc_scan_impl {
                     pdb.enable_back_to_back($pdb_channel, 1);
                 }
 
+                // LDOK moves MOD and CHnDLY0 across only while PDBEN is set
+                // (K20 RM ch35, SC[LDOK]), and configure() wrote PDBEN = 0.
+                // The counter does not start before the software trigger.
+                pdb.enable();
                 pdb.load_ok();
 
                 // 4. Configure DMA: peripheral read from ADC RA → results buffer
@@ -587,8 +597,7 @@ macro_rules! adc_scan_impl {
                 dma_ch.set_source($dma_source);
                 dma_ch.enable_request();
 
-                // 5. Enable PDB and trigger
-                pdb.enable();
+                // 5. Start the PDB (enabled above, before LDOK).
                 pdb.software_trigger();
 
                 ContinuousScan {
@@ -607,14 +616,16 @@ macro_rules! adc_scan_impl {
             /// 2. ADC converts the channel currently selected in SC1A.
             /// 3. ADC completion fires a DMA request.
             /// 4. DMA-A reads the result register (RA) into `results[i]`.
-            /// 5. DMA-A's minor loop link triggers DMA-B.
+            /// 5. DMA-A's channel link triggers DMA-B (minor-loop link, plus
+            ///    the major-loop link for the last result of each scan).
             /// 6. DMA-B writes the next channel number from `mux_buf[i]` into SC1A.
             /// 7. The cycle repeats continuously.
             ///
-            /// The `mux_buf` must be pre-filled by the caller with SC1A register
-            /// values rotated by 1 position: `[ch[1], ch[2], ..., ch[N-1], ch[0]]`.
-            /// Before starting, `ch[0]` is written to SC1A. After each result read,
-            /// DMA-B queues the next channel.
+            /// This function fills `mux_buf` with SC1A register values rotated
+            /// by 1 position: `[ch[1], ch[2], ..., ch[N-1], ch[0]]`. Before
+            /// starting, `ch[0]` is written to SC1A. After each result read,
+            /// DMA-B queues the next channel, so `results[i]` always holds
+            /// `channels[i]`.
             ///
             /// # Arguments
             ///
@@ -683,10 +694,19 @@ macro_rules! adc_scan_impl {
                 pdb.disable_pretrigger($pdb_channel, 1);
                 pdb.disable_back_to_back($pdb_channel, 1);
 
+                // LDOK moves MOD and CHnDLY0 across only while PDBEN is set
+                // (K20 RM ch35, SC[LDOK]), and configure() wrote PDBEN = 0.
+                // The counter does not start before the software trigger.
+                pdb.enable();
                 pdb.load_ok();
 
                 // 5. Configure DMA-A: ADC RA → results buffer (16-bit).
-                //    Minor loop links to DMA-B after each transfer.
+                //    Each result must start DMA-B. The minor-loop link does
+                //    not fire on the minor loop that ends the major loop (K20
+                //    RM ch21, CITER[ELINK]: "suppressed in favor of the
+                //    MAJORELINK channel linking"), so link DMA-B on both. With
+                //    the minor link only, DMA-B ran N-1 times per N results
+                //    and the channel-to-slot map moved one step every scan.
                 let n = num_ch as u16;
                 unsafe {
                     dma_a.configure_linked(
@@ -704,7 +724,10 @@ macro_rules! adc_scan_impl {
                             dest_modulo: 0,
                             auto_disable: false,    // Continuous — never stop
                         },
-                        crate::dma::ChannelLink::MinorLoop { channel: DMA_B },
+                        crate::dma::ChannelLink::Both {
+                            minor_channel: DMA_B,
+                            major_channel: DMA_B,
+                        },
                     );
                 }
 
@@ -737,8 +760,7 @@ macro_rules! adc_scan_impl {
                 dma_a.enable_request();
                 dma_b.enable_request();
 
-                // 7. Enable PDB and trigger.
-                pdb.enable();
+                // 7. Start the PDB (enabled above, before LDOK).
                 pdb.software_trigger();
 
                 MultiChannelScan {

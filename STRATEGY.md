@@ -611,14 +611,14 @@ Implements `usb_device::bus::UsbBus` (v0.3) for the Kinetis USB-FS controller.
 
 USB requires exactly 48 MHz. Derived from PLL via SIM:
 - `SIM SOPT2`: `pllfllsel().pll()` + `usbsrc()._1()`
-- `SIM CLKDIV2`: mk20d7 USBFRAC=1,USBDIV=2 (72×2/3=48); mk20d5 USBFRAC=0,USBDIV=0 (48×1=48)
+- `SIM CLKDIV2`: derived from `Clocks` since 0.2.0 — 72 MHz (1,2), 96 MHz (0,1), 120 MHz (1,4)
 - `SIM SCGC4`: `usbotg()._1()` clock gate
 
 ### 11.3 Implementation
 
 - `UsbBus` struct with `UnsafeCell<Inner>` for interior mutability (trait requires `&self`)
 - Static BDT (512-byte aligned) and buffer pool (64×64 bytes)
-- `UsbBusExt` extension trait: `pac::Usb0.usb_bus(&sim)` → `UsbBus`
+- `UsbBusExt` extension trait: `pac::Usb0.usb_bus(&sim, &clocks)` → `UsbBus` (`&Clocks` since 0.2.0)
 - Full `usb_device::bus::UsbBus` trait implementation
 - Compatible with `usb-device` class crates (usbd-serial, usbd-hid, etc.)
 

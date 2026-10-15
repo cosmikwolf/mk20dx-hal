@@ -1,6 +1,6 @@
 # mk20dx-hal: Project Status
 
-**Last updated:** 2026-08-31 (full on-target sweep green: 34 binaries, 247 tests)
+**Last updated:** 2026-10-14 (0.2.1: interrupt-driven USB). Last full on-target sweep: 2026-08-31, 34 binaries, 247 tests.
 
 ---
 
@@ -82,7 +82,7 @@ PAC is dual-licensed MIT/Apache-2.0, has README.md, and Cargo.toml metadata is r
 | `Mhz96` | 96 MHz | 48 MHz | 24 MHz | ÷4 | ×24 | Overclock, widely used |
 | `Mhz120` | 120 MHz | 60 MHz | 24 MHz | ÷4 | ×30 | Overclock, Teensyduino default |
 
-**Known limitation (partly addressed 2026-09-11, see Phase 11):** the USB clock divider (SIM CLKDIV2) was hardcoded for 72 MHz PLL output, so USB could not enumerate at 96 or 120 MHz. The uncommitted working-tree change now writes the 120 MHz pair. The proper fix is still to derive the divider from the actual PLL frequency (take `&Clocks` in `usb_bus()` and write the pair in `enable()`): 48 MHz to (0,0), 72 to (1,2), 96 to (0,1), 120 to (1,4).
+**USB clock divider (fixed in 0.2.0):** SIM CLKDIV2 was hard-coded. `usb_bus()` now takes `&Clocks` and derives the pair from the PLL: 72 MHz to (1,2), 96 to (0,1), 120 to (1,4); anything else panics at init.
 
 Reference: K20 ref manual chapters 5 (Clock Distribution), 12 (SIM), 24 (MCG)
 
@@ -285,26 +285,28 @@ Reference: K20 ref manual chapter 21 (eDMA), chapter 22 (DMAMUX)
 
 ---
 
-## Phase 11: USB Device — registers COMPLETE, enumeration NOT WORKING (see 2026-09-11 below)
+## Phase 11: USB Device — COMPLETE (enumerates since 0.2.0; interrupt-driven poll since 0.2.1)
 
 - [x] `UsbBus` struct implementing `usb_device::bus::UsbBus` trait (v0.3)
-- [x] `UsbBusExt` extension trait on `pac::Usb0` with `usb_bus(sim)` → `UsbBus`
+- [x] `UsbBusExt` extension trait on `pac::Usb0` with `usb_bus(&sim, &clocks)` → `UsbBus`
 - [x] BDT (Buffer Descriptor Table) — 512-byte aligned static, 16 endpoints × 2 dir × 2 ping-pong
 - [x] Static endpoint buffer pool — 64 × 64-byte buffers, 4-byte aligned
 - [x] USB 48 MHz clock configuration (SIM SOPT2/CLKDIV2/SCGC4)
-  - mk20d7: 72 MHz PLL × 2/3 = 48 MHz (USBFRAC=1, USBDIV=2)
-  - mk20d5: 48 MHz PLL × 1/1 = 48 MHz (USBFRAC=0, USBDIV=0)
+  - USBFRAC/USBDIV derived from `Clocks`: 72 MHz (1,2), 96 MHz (0,1), 120 MHz (1,4)
 - [x] Endpoint allocation with type/direction tracking
 - [x] Ping-pong buffer management (EVEN/ODD banks)
-- [x] DATA0/DATA1 toggle tracking per endpoint per direction
+- [x] DATA0/DATA1: RX EVEN=DATA0, ODD=DATA1 (bulk/interrupt); EP0 re-arms DATA1. TX toggle per endpoint
 - [x] TOKDNE FIFO processing (read STAT before clearing ISTAT)
 - [x] SETUP token detection and data toggle reset
 - [x] Stall/unstall with data toggle reset
-- [x] Suspend/resume via USBCTRL SUSP bit
+- [x] Suspend/resume: RESUMEEN on only between `suspend()` and `resume()`/`reset()` (USBCTRL SUSP is not used)
 - [x] Force reset via USBENSOFEN toggle
 - [x] ISTAT/ERRSTAT w1c correct handling (write() not modify())
 - [x] No `#[cfg]` needed — both mk20d5 and mk20d7 have identical USB0
-- [x] Hardware validation: tests in `mk20dx-testsuite/tests/usb.rs` (6 tests, init/alloc only)
+- [x] `poll()` from the USB0 interrupt; SOF opt-in (`enable_sof_interrupt`, `take_sof`, `frame_number`)
+- [x] Hardware validation: `mk20dx-testsuite/tests/usb.rs` (6 tests, init/alloc only) and
+  `tests/usb_irq.rs` (4 tests, feature `usb-host`, needs a USB host: enumeration, SOF, MIDI OUT)
+- [ ] An 8-byte EP0 does not enumerate on macOS (see 2026-10-14); use `max_packet_size_0(64)`
 
 ### 2026-10-14 — interrupt-driven poll, SOF tick, RX toggle fix
 
@@ -391,7 +393,7 @@ allocated is wanted; a MIDI device needs 3.
 Phase 11 was marked complete from register-level tests only. The first
 attempt to enumerate on hardware (FLXS1 board, MK20DX256 at a 120 MHz PLL,
 macOS host) found three real defects. All three fixes are in the working
-tree and **uncommitted** as of 2026-09-14; `src/usb.rs` is the only
+tree and **uncommitted** as of 2026-09-14 (released in 0.2.0); `src/usb.rs` is the only
 modified file.
 
 1. **No D+ pull-up.** `enable()` never wrote `USB0_CONTROL[DPPULLUPNONOTG]`,
@@ -468,7 +470,7 @@ Reference: K20 ref manual chapter 34 (USB OTG / USB-FS)
 | Category | Hardware Needed |
 |----------|----------------|
 | I2C device communication | I2C EEPROM (AT24C32) + 4.7kΩ pull-ups |
-| USB enumeration / data transfer | USB cable + host PC |
+| USB enumeration / data transfer | USB cable + host PC (done for MIDI OUT: `tests/usb_irq.rs`) |
 | PWM frequency/duty cycle accuracy | Oscilloscope or logic analyzer |
 | Delay absolute accuracy | Oscilloscope or frequency counter |
 | ADC external pin accuracy | Known voltage source + wiring |

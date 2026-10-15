@@ -127,7 +127,7 @@ Following the dominant embedded Rust ecosystem pattern (stm32f4xx-hal, nrf-hal, 
 | `FtmExt` | `pac::Ftm0`, etc. | `pwm(freq, clocks, sim)` | `FtmXChannels` |
 | `AdcExt` | `pac::Adc0`, etc. | `adc(clocks, sim)` | `Adc<Instance>` |
 | `DmaExt` | `pac::Dma` | `split(dmamux, sim)` | `DmaChannels` |
-| `UsbBusExt` | `pac::Usb0` | `usb_bus(sim)` | `UsbBus` |
+| `UsbBusExt` | `pac::Usb0` | `usb_bus(&sim, &clocks)` | `UsbBus` |
 
 ```rust
 use mk20dx_hal::prelude::*;
@@ -183,7 +183,7 @@ Most peripheral `::new()` methods require a `&Clocks` reference to prove clocks 
 |-------|---------|---------|
 | `embedded-hal` | 1.0 | Trait definitions (digital, SPI, I2C, delay, PWM) |
 | `embedded-hal-nb` | 1.0 | Non-blocking serial traits |
-| `embedded-io` | 0.6 | Blocking byte-stream I/O (UART) |
+| `embedded-io` | 0.7 | Blocking byte-stream I/O (UART) |
 | `cortex-m` | 0.7 | Core peripheral access (NVIC, SysTick), critical sections |
 | `cortex-m-rt` | 0.7 | Runtime (optional, via `rt` feature) |
 | `nb` | 1.1 | Non-blocking result type |

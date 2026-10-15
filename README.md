@@ -112,7 +112,7 @@ fn main() -> ! {
 | ADC | `adc` | *(HAL-specific)* | Calibration, DMA, PDB-triggered multi-channel scan |
 | PIT | `timer` | *(HAL-specific)* | 4-channel periodic interrupt timer |
 | DMA | `dma` | *(HAL-specific)* | eDMA + DMAMUX, channel linking, scatter-gather |
-| USB | `usb` | `usb-device::UsbBus` | Full-speed device, ping-pong buffers |
+| USB | `usb` | `usb-device::UsbBus` | Full-speed device, ping-pong buffers, `poll()` from the USB0 interrupt, SOF tick. Use `max_packet_size_0(64)` |
 | DAC | `dac` | *(HAL-specific)* | 12-bit, mk20d7 only |
 | Flash | `flash` | `NorFlash`, `ReadNorFlash` | FTFL, 2 KB sectors |
 | EEPROM | `eeprom` | *(HAL-specific)* | FlexMemory emulated EEPROM |

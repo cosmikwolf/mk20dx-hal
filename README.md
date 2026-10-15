@@ -109,7 +109,7 @@ fn main() -> ! {
 | SPI | `spi` | `SpiBus` | DSPI, baud rate calc, DMA (PUSHR) |
 | I2C | `i2c` | `I2c` | 7-bit addressing, I2C0 (+I2C1 on mk20d7) |
 | PWM | `pwm` | `SetDutyCycle` | FTM0-2, combined mode, dead-time, input capture, output compare, quadrature decoder |
-| ADC | `adc` | *(HAL-specific)* | Calibration, DMA, PDB-triggered multi-channel scan |
+| ADC | `adc` | *(HAL-specific)* | Calibration, averaging, DMA, PDB-triggered multi-channel scan (3+ channels; the 1-2 channel `start_continuous_scan` has a known issue, see CHANGELOG) |
 | PIT | `timer` | *(HAL-specific)* | 4-channel periodic interrupt timer |
 | DMA | `dma` | *(HAL-specific)* | eDMA + DMAMUX, channel linking, scatter-gather |
 | USB | `usb` | `usb-device::UsbBus` | Full-speed device, ping-pong buffers, `poll()` from the USB0 interrupt, SOF tick. Use `max_packet_size_0(64)` |

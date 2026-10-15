@@ -14,7 +14,7 @@
 //!
 //! let dp = pac::Peripherals::take().unwrap();
 //! // ... configure clocks, disable watchdog ...
-//! let mut dma = dp.DMA.split(dp.DMAMUX, &dp.SIM);
+//! let mut dma = dp.dma.split(dp.dmamux, &dp.sim);
 //!
 //! // Memory-to-memory transfer via software trigger
 //! let src = [1u8, 2, 3, 4];

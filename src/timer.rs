@@ -11,7 +11,7 @@
 //!
 //! let dp = pac::Peripherals::take().unwrap();
 //! // ... configure clocks ...
-//! let pit = dp.PIT.split(&dp.SIM, &clocks);
+//! let pit = dp.pit.split(&dp.sim, &clocks);
 //! let mut ch0 = pit.ch0;
 //! ch0.start(1_000_000u32.micros()); // 1 second period
 //! nb::block!(ch0.wait()).ok();

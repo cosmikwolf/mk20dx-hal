@@ -15,7 +15,7 @@
 //!
 //! let dp = pac::Peripherals::take().unwrap();
 //! // ... configure clocks, disable watchdog ...
-//! let mut pdb = dp.PDB0.constrain(&dp.SIM);
+//! let mut pdb = dp.pdb0.constrain(&dp.sim);
 //!
 //! // Configure PDB: software trigger, prescaler /1, mult x1, modulus 1000
 //! pdb.configure(TriggerSource::Software, Prescaler::Div1, Multiplier::Mult1, 1000);
@@ -24,8 +24,9 @@
 //! // Enable pre-trigger 0 on channel 0 with delay of 0
 //! pdb.set_pretrigger_delay(0, 0, 0);
 //! pdb.enable_pretrigger(0, 0);
-//! pdb.load_ok();
+//! // enable() before load_ok(): LDOK works only while the PDB is enabled.
 //! pdb.enable();
+//! pdb.load_ok();
 //! pdb.software_trigger();
 //! ```
 

@@ -250,7 +250,8 @@ Reference: K20 ref manual chapter 36 (FTM), §36.4.15 (COMBINE), §36.4.16 (DEAD
   - [x] PDB fires single pre-trigger 0 continuously; DMA handles mux rotation
   - [x] `sc1a_dma_addr()` helper for DMA mux writes to SC1[0]
 - [x] Hardware validation: tests in `mk20dx-testsuite/tests/adc.rs` (10 tests, internal references)
-  and `tests/adc_scan.rs` (5 tests: multi-channel slot map for 3/4/5 channels, PDB rate)
+  and `tests/adc_scan.rs` (7 tests: multi-channel slot map for 3/4/5 channels, PDB rate,
+  averaging kept, restart after a sequence error)
 
 Reference: K20 ref manual chapter 31 (ADC), chapter 34 (PDB)
 
@@ -309,10 +310,10 @@ Reference: K20 ref manual chapter 21 (eDMA), chapter 22 (DMAMUX)
   `tests/usb_irq.rs` (4 tests, feature `usb-host`, needs a USB host: enumeration, SOF, MIDI OUT)
 - [ ] An 8-byte EP0 does not enumerate on macOS (see 2026-10-14); use `max_packet_size_0(64)`
 
-### 2026-10-15 — ADC multi-channel scan: slot map and rate (0.2.2)
+### 2026-10-15 — ADC multi-channel scan: slot map, rate, averaging (0.2.2)
 
 Reported by flxs1 (ADC1, channels [9, 0, 19, 3], PDB 1 kHz, DMA 4/5): one
-input at a distinct level moved between the result slots. Two bugs, both
+input at a distinct level moved between the result slots. Four bugs, all
 verified on target with `mk20dx-testsuite/tests/adc_scan.rs`:
 
 1. **The slot map moved one step every scan.** DMA-A linked DMA-B on the
@@ -324,6 +325,18 @@ verified on target with `mk20dx-testsuite/tests/adc_scan.rs`:
    `load_ok()` before `enable()`; LDOK works only with PDBEN set (RM ch35),
    so MOD stayed 0xFFFF: 549 Hz at a 36 MHz bus whatever the config. Now
    `enable()` comes first. MOD=3600 gives 1000 results in 100 ms.
+
+3. **The scan dropped hardware averaging.** Both scans wrote `SC3 = 0`. They
+   now keep `AVGE`/`AVGS` from `set_averaging()`. Avg4 at 10 kHz: 1000
+   results in 100 ms, SC3 = 0x04, slot map fixed. Asked for by flxs1, whose C
+   firmware used 4 averages.
+4. **A PDB sequence error blocked every later scan.** With Avg32 (about
+   400 µs) at a 100 µs period, the scan stops after 1 result with
+   `CH1S[ERR]` set, ADC idle. `ERR` stayed set across a PDB disable and the
+   next scan did not convert at all. Scan start now clears `ERR`; 4 of 4
+   restarts after an overrun gave 200 results in 20 ms. One diagnostic run
+   that read registers between the scans still stalled after 1 result with
+   `ERR = 0`; cause not found, not seen again.
 
 Still open: **`start_continuous_scan` (1-2 channels) does not work.** A
 diagnostic run with [VREFSH, VREFSL] gave `results` = [1023, 1023] with

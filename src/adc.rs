@@ -353,6 +353,17 @@ adc_impl!(pac::Adc1, Adc1, scgc3, adc1, crate::dma::DmaSource::ADC1);
 // ----- PDB-triggered continuous scanning -----
 
 /// Configuration for PDB-triggered continuous ADC scanning.
+///
+/// Hardware averaging is not a field here: a scan keeps the averaging that
+/// [`Adc::set_averaging`] set (call it after [`Adc::calibrate`], which
+/// restores SC3). Each PDB trigger then gives one averaged result, so the
+/// averaged conversion must end before the next trigger: about 12 µs per
+/// sample at the default 10-bit, long-sample, bus/8 ADC clock at 72 MHz.
+///
+/// If one (averaged) conversion takes longer than the PDB period, the next
+/// trigger sets a PDB sequence error and the scan stops for good: it keeps
+/// the last results and does not update them. Starting a new scan clears
+/// the error.
 pub struct ScanConfig {
     /// ADC channels to scan (1-2 for basic mode).
     ///
@@ -535,8 +546,12 @@ macro_rules! adc_scan_impl {
 
                 // 1. Enable hardware trigger mode and DMA
                 adc.sc2().modify(|_, w| w.adtrg()._1().dmaen()._1());
-                // Disable continuous mode — PDB triggers each conversion
-                adc.sc3().write(|w| w);
+                // Disable continuous mode — PDB triggers each conversion.
+                // Keep AVGE/AVGS from set_averaging(); clear ADCO and CAL.
+                // CALF (w1c) is written 0, which has no effect.
+                let avg = adc.sc3().read().bits() & 0b0111;
+                // SAFETY: only AVGE (bit 2) and AVGS (bits 1:0) can be set.
+                adc.sc3().write(|w| unsafe { w.bits(avg) });
 
                 // 2. Write channel mux values to SC1A (and SC1B if 2 channels)
                 // SAFETY: adch is a 5-bit field; masked to 0x1F.
@@ -557,6 +572,10 @@ macro_rules! adc_scan_impl {
                     config.modulus,
                 );
                 pdb.set_continuous(true);
+                // A sequence error left from an earlier scan (a trigger that
+                // came while a conversion ran) blocks the pre-trigger until
+                // ERR is cleared; a disable does not clear it.
+                pdb.clear_errors($pdb_channel);
 
                 // Pre-trigger 0: delay=0, triggers SC1A → channel[0]
                 pdb.set_pretrigger_delay($pdb_channel, 0, 0);
@@ -669,8 +688,12 @@ macro_rules! adc_scan_impl {
 
                 // 2. Enable hardware trigger mode and DMA on the ADC.
                 adc.sc2().modify(|_, w| w.adtrg()._1().dmaen()._1());
-                // Disable continuous mode — PDB triggers each conversion
-                adc.sc3().write(|w| w);
+                // Disable continuous mode — PDB triggers each conversion.
+                // Keep AVGE/AVGS from set_averaging(); clear ADCO and CAL.
+                // CALF (w1c) is written 0, which has no effect.
+                let avg = adc.sc3().read().bits() & 0b0111;
+                // SAFETY: only AVGE (bit 2) and AVGS (bits 1:0) can be set.
+                adc.sc3().write(|w| unsafe { w.bits(avg) });
 
                 // 3. Write the first channel into SC1A to prime the pipeline.
                 // SAFETY: adch is a 5-bit field; masked to 0x1F.
@@ -686,6 +709,10 @@ macro_rules! adc_scan_impl {
                     config.modulus,
                 );
                 pdb.set_continuous(true);
+                // A sequence error left from an earlier scan (a trigger that
+                // came while a conversion ran) blocks the pre-trigger until
+                // ERR is cleared; a disable does not clear it.
+                pdb.clear_errors($pdb_channel);
 
                 // Pre-trigger 0: delay=0, triggers SC1A
                 pdb.set_pretrigger_delay($pdb_channel, 0, 0);

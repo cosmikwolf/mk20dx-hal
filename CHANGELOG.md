@@ -22,6 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   MOD kept its reset value 0xFFFF: every scan ran at bus clock / 65536 (549
   Hz at 72 MHz, 916 Hz at 120 MHz). The PDB is now enabled before LDOK. A
   scan now runs at the configured rate; check timing that used the old rate.
+- Both scan functions wrote `SC3 = 0` and so dropped the hardware
+  averaging that `Adc::set_averaging()` set. They now keep `AVGE`/`AVGS`
+  and clear only `ADCO`/`CAL`. Call `set_averaging()` after `calibrate()`
+  and before the scan. `ScanConfig` does not change.
+- A PDB sequence error (a trigger while a conversion runs, for example
+  averaging that is longer than the PDB period) stopped that scan and every
+  later one: `CHnS[ERR]` blocks the pre-trigger and a PDB disable does not
+  clear it. A scan start now clears it. The overrun itself still stops the
+  running scan; the `ScanConfig` docs give the timing rule.
 - `start_multi_channel_scan` docs said that the caller fills `mux_buf`. The
   function fills it.
 

@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.1] - 2026-10-14
 
 ### Added — interrupt-driven USB
 
@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `UsbBus::take_sof() -> bool`: true once after a `poll()` that saw a SOF.
 - `UsbBus::frame_number() -> u16`: the 11-bit frame number.
 - Module docs: an RTIC example with `poll()` in a `binds = USB0` task.
+  Both module doc examples now set `max_packet_size_0(64)`; see Known issue.
 
 ### Fixed
 
@@ -126,4 +127,5 @@ the undocumented `USBTRC0 = 0x40` bit, before `CTL` is enabled.
 
 - Initial release.
 
+[0.2.1]: https://github.com/cosmikwolf/mk20dx-hal/releases/tag/v0.2.1
 [0.2.0]: https://github.com/cosmikwolf/mk20dx-hal/releases/tag/v0.2.0

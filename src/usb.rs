@@ -19,7 +19,11 @@
 //! let usb_bus = dp.usb0.usb_bus(&dp.sim, &clocks);
 //! let usb_bus_alloc = UsbBusAllocator::new(usb_bus);
 //!
+//! // Use a 64-byte EP0. With the usb-device default of 8, a macOS host stops
+//! // after SET_ADDRESS and the device never reaches Configured (open issue).
 //! let mut usb_dev = UsbDeviceBuilder::new(&usb_bus_alloc, UsbVidPid(0x16c0, 0x27dd))
+//!     .max_packet_size_0(64)
+//!     .unwrap()
 //!     .build();
 //!
 //! loop {
@@ -69,7 +73,11 @@
 //!         let alloc: &'static _ = cx.local.usb_alloc.insert(UsbBusAllocator::new(usb_bus));
 //!
 //!         let midi = UsbMidiClass::new(alloc, 1, 1).unwrap();
-//!         let usb_dev = UsbDeviceBuilder::new(alloc, UsbVidPid(0x16c0, 0x0485)).build();
+//!         // A 64-byte EP0: see the note in the polling example.
+//!         let usb_dev = UsbDeviceBuilder::new(alloc, UsbVidPid(0x16c0, 0x0485))
+//!             .max_packet_size_0(64)
+//!             .unwrap()
+//!             .build();
 //!
 //!         // RTIC unmasks USB0 when init returns. Nothing calls the bus before that.
 //!         (Shared {}, Local { usb_dev, midi })

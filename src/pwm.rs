@@ -757,6 +757,13 @@ pub struct FtmChannel<FTM, const CH: u8> {
     _ftm: PhantomData<FTM>,
 }
 
+/// True if channel `ch` is in the input-capture encoding written by
+/// [`FtmChannel::set_input_capture`]: MSB:MSA=00, ELSB:ELSA!=00.
+fn is_input_capture<FTM: sealed::FtmInstance>(ch: usize) -> bool {
+    let r = ftm_regs::<FTM>().csc(ch).read();
+    !r.msa().bit() && !r.msb().bit() && (r.elsa().bit() || r.elsb().bit())
+}
+
 impl<FTM: sealed::FtmInstance, const CH: u8> FtmChannel<FTM, CH> {
     // --- Mode configuration ---
 
@@ -1855,14 +1862,42 @@ impl<FTM: sealed::FtmInstance> QuadratureDecoder<FTM> {
     /// period to `value` bus clock cycles.
     pub fn set_filter(&mut self, phase_a: u8, phase_b: u8) {
         let ftm = ftm_regs::<FTM>();
+
+        // FILTER takes effect immediately and must only be written while
+        // CH0..CH3 are not in input modes (K20P64M72SF1RM, FTMx_FILTER). 
+        // Temporarily take the decoder and any input-capture channel (MSB:MSA=00,
+        // ELS!=00) on CH0..CH3 out of input mode for the write, then restore them. 
+        // The decoder uses CH0/CH1 as inputs without setting CnSC, so it is disabled via QUADEN.
+        let quaden = ftm.qdctrl().read().quaden().is_1();
+        if quaden {
+            ftm.qdctrl().modify(|_, w| w.quaden()._0());
+        }
+        let mut saved_edges = [(false, false); 4];
+        for (ch, saved) in saved_edges.iter_mut().enumerate() {
+            if is_input_capture::<FTM>(ch) {
+                let r = ftm.csc(ch).read();
+                *saved = (r.elsa().bit(), r.elsb().bit());
+                ftm.csc(ch).modify(|_, w| w.elsa().clear_bit().elsb().clear_bit());
+            }
+        }
+
         // SAFETY: chNfval are 4-bit fields; values masked to 0x0F.
         ftm.filter().modify(|_, w| unsafe {
             w.ch0fval().bits(phase_a & 0x0F)
              .ch1fval().bits(phase_b & 0x0F)
         });
+
+        // Restore input capture edge selection.
+        // modify() (not a write of the saved CnSC) so a pending CHF is kept.
+        for (ch, &(elsa, elsb)) in saved_edges.iter().enumerate() {
+            if elsa || elsb {
+                ftm.csc(ch).modify(|_, w| w.elsa().bit(elsa).elsb().bit(elsb));
+            }
+        }
         ftm.qdctrl().modify(|_, w| {
             let w = if phase_a > 0 { w.phafltren()._1() } else { w.phafltren()._0() };
-            if phase_b > 0 { w.phbfltren()._1() } else { w.phbfltren()._0() }
+            let w = if phase_b > 0 { w.phbfltren()._1() } else { w.phbfltren()._0() };
+            if quaden { w.quaden()._1() } else { w }
         });
     }
 

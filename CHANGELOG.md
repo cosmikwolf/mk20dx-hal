@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `QuadratureDecoder::set_filter` wrote FTMx_FILTER while CH0..CH3 could
+  be inputs. FILTER takes effect immediately and must only be written
+  while those channels are not in input modes (K20P64M72SF1RM ch36, FTMx_FILTER),
+  or a valid edge can be missed. The decoder itself (QUADEN) uses CH0/CH1
+  as inputs, and `QuadratureDecoder::new` does not stop other code from
+  putting CH2/CH3 (or CH0/CH1) in input capture through `FtmExt::split()`.
+  `set_filter` now clears QUADEN and the edge bits of any input-capture
+  channel on CH0..CH3 for the write, then restores them.
+  
 ## [0.3.2] - 2026-11-05
 
 ### Fixed
